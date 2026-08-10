@@ -56,3 +56,7 @@ PulseRing {
 ## 退出
 
 `pkill pulse-ring`
+
+## 许可证
+
+GPL-3.0-or-later © MEKCCK，详见 [LICENSE](LICENSE)。
