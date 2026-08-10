@@ -1,0 +1,25 @@
+[package]
+name = "pulse-ring"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smithay-client-toolkit = { version = "0.21", features = ["system"] }
+wayland-client = { version = "0.31", features = ["system"] }
+cpal = "0.15"
+realfft = "3.5"
+rustfft = "6.4"
+crossbeam-channel = "0.5"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+wgpu = "30"
+pollster = "1"
+raw-window-handle = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
+wayland-protocols = { version = "0.32.13", features = ["staging"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
