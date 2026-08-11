@@ -1252,6 +1252,22 @@ const SHADER_SRC: &str = stringify!(
                         w_a += tc.a * walpha * cont_a;
                     }
                 }
+            } else if (wtype == 6.0) {
+                // Plugin widget: square box sampling the plugin texture.
+                let uv_x = u.widgets[wo + 7u];
+                let uv_y = u.widgets[wo + 8u];
+                let uv_w = u.widgets[wo + 9u];
+                let uv_h = u.widgets[wo + 10u];
+                let half = vec2<f32>(wsize * min_d, wsize * min_d) * 0.5;
+                if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
+                    let uv = vec2<f32>(
+                        uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,
+                        uv_y + (wd.y / (half.y * 2.0) + 0.5) * uv_h,
+                    );
+                    let tc = textureSample(widget_texture, widget_sampler, uv);
+                    w_col += tc.rgb * tc.a * walpha;
+                    w_a += tc.a * walpha;
+                }
             } else {
                 // Image / clock widget.
                 let uv_x = u.widgets[wo + 7u];
@@ -1259,7 +1275,11 @@ const SHADER_SRC: &str = stringify!(
                 let uv_w = u.widgets[wo + 9u];
                 let uv_h = u.widgets[wo + 10u];
                 let aspect = u.widgets[wo + 11u];
-                let half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
+                // Plugin textures are square (256x256): force a square box.
+                var half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
+                if (wtype == 6.0) {
+                    half = vec2<f32>(wsize * min_d, wsize * min_d) * 0.5;
+                }
                 if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
                     let uv = vec2<f32>(
                         uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,

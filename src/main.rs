@@ -25,6 +25,7 @@ mod audio;
 mod config;
 mod draw;
 mod lua;
+mod plugin;
 use audio::NBANDS;
 use draw::RingRenderer;
 
@@ -72,6 +73,9 @@ struct App {
     current_cover: Option<ImageData>,
     cover_slot: usize,
     lua_state: lua::LuaState,
+    plugins: Vec<plugin::LoadedPlugin>,
+    plugin_tex: Vec<Option<(u32, u32, Vec<u8>)>>,
+    plugin_smooth_bands: [f32; 128],
     music: lua::MusicInfo,
     ring_amp_smooth: f32,
     last_music_poll: f32,
@@ -140,7 +144,7 @@ fn main() {
         image_cache: Vec::new(),
         font: std::sync::Arc::new(load_font()),
         clock_cache: std::array::from_fn(|_| (String::new(), 0, 0, 0)),
-        texture_slots: vec![None; 8],
+        texture_slots: vec![None; 16],
         widget_uvs: [(0.0, 0.0, 0.0, 0.0); 32],
         cover_rx: spawn_cover_thread(),
         last_cover_path: String::new(),
@@ -150,6 +154,9 @@ fn main() {
         current_cover: None,
         cover_slot: 0,
         lua_state,
+        plugins: plugin::load_plugins_with_log(),
+        plugin_tex: Vec::new(),
+        plugin_smooth_bands: [0.0; 128],
         music: lua::MusicInfo::default(),
         ring_amp_smooth: 0.0,
         last_music_poll: -10.0,
@@ -681,6 +688,7 @@ impl App {
                 WidgetType::Bars => 3.0,
                 WidgetType::Cover => 4.0,
                 WidgetType::Analog => 5.0,
+                WidgetType::Plugin => 6.0,
             };
             data[o + 1] = w.x;
             data[o + 2] = w.y;
@@ -739,6 +747,20 @@ impl App {
                 data[co + 3] = col[3];
             }
             match w.widget_type {
+                WidgetType::Plugin => {
+                    // tex index points at the plugin's render slot (8 + plugin index)
+                    let pidx = w
+                        .plugin
+                        .as_ref()
+                        .and_then(|n| self.plugins.iter().position(|p| p.name() == n))
+                        .unwrap_or(0);
+                    let ti = (8 + pidx) as u32;
+                    data[o + 6] = ti as f32;
+                    data[o + 11] = 1.0; // square aspect default; updated when rendered
+                    if tex_index <= ti {
+                        tex_index = ti + 1;
+                    }
+                }
                 WidgetType::Ring => {
                     data[o + 6] = 0.0;
                     data[o + 7] = 0.0;
@@ -826,17 +848,7 @@ impl App {
                 }
             }
         }
-        log::info!("widgets: configured={} data[0..12]={:?}", self.cfg.widgets.len(), &data[..12]);
         for (si, w) in widgets.iter().enumerate() {
-            if w.widget_type == crate::config::WidgetType::Image {
-                log::info!("image widget slot={} data={:?}", si, &data[si * 40..si * 40 + 24]);
-            }
-            if w.widget_type == crate::config::WidgetType::Cover {
-                log::info!("cover widget slot={} data={:?}", si, &data[si * 40..si * 40 + 24]);
-            }
-            if w.widget_type == crate::config::WidgetType::Clock {
-                log::info!("clock widget slot={} data={:?}", si, &data[si * 40..si * 40 + 12]);
-            }
         }
         data
     }
@@ -878,6 +890,56 @@ impl App {
         }
     }
 
+    /// Ask each plugin to render its RGBA texture, then store into texture_slots for
+    /// `type: "plugin"` widgets (each plugin owns slot = 8 + plugin index).
+    fn render_plugin_textures(&mut self) {
+        let n = self.plugins.len();
+        self.plugin_tex.resize(n, None);
+        let (screen_w, screen_h) = self
+            .outputs
+            .first()
+            .map(|o| (o.width, o.height))
+            .unwrap_or((1920, 1080));
+        for (i, p) in self.plugins.iter().enumerate() {
+            let slot = (8 + i) as u32;
+            // allocate a 512x512 buffer per plugin (host-owned)
+            let mut buf = vec![0u8; 512 * 512 * 4];
+            let mut req = plugin::RenderRequest {
+                slot,
+                buf_len: buf.len(),
+                buf: buf.as_mut_ptr(),
+                update: false,
+                width: 0,
+                height: 0,
+                screen_w,
+                screen_h,
+            };
+            p.bind_state(&self.bands, &self.cfg as *const crate::config::Config);
+            p.call_render(&mut req);
+            if req.update && req.width > 0 && req.height > 0 {
+                let w = req.width.min(512);
+                let h = req.height.min(512);
+                // Plugin writes a w×h image at the start of the buffer with row stride = w.
+                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let si = ((y * w + x) * 4) as usize;
+                        rgba.extend_from_slice(&buf[si..si + 4]);
+                    }
+                }
+                self.plugin_tex[i] = Some((w, h, rgba));
+            }
+        }
+        // write plugin textures into texture_slots (so prepare_widgets picks them up)
+        for (i, tex) in self.plugin_tex.iter().enumerate() {
+            if let Some((w, h, rgba)) = tex {
+                let ti = 8 + i;
+                let img = ImageData { w: *w, h: *h, rgba: rgba.clone() };
+                self.texture_slots[ti] = Some(img);
+            }
+        }
+    }
+
     fn pull_audio(&mut self) {
         while let Ok(b) = self.audio_rx.try_recv() {
             self.bands = b;
@@ -902,8 +964,37 @@ impl App {
             self.poll_music();
         }
         // Lua hooks: let the script transform bands and tweak config each frame.
-        self.bands = self.lua_state.transform_bands(&self.bands);
+        // NOTE: transforms operate on a copy; self.bands stays the raw audio data so the
+        // transforms never feed back into themselves (which caused cumulative amplification).
+        let mut render_bands = self.lua_state.transform_bands(&self.bands);
         self.lua_state.frame(&mut self.cfg, &self.bands, elapsed, &self.music);
+        // Rust plugins: per-frame update + band transform chain.
+        let (h, m, s, _) = main_now_hmsparts();
+        let cfg_ptr = &self.cfg as *const crate::config::Config;
+        for p in self.plugins.iter_mut() {
+            let mut bridge = plugin::HostBridge {
+                cfg: &mut self.cfg,
+                bands: &self.bands,
+                log_cb: |msg| log::info!("[plugin] {msg}"),
+                now_hms: (h, m, s),
+            };
+            let ctx = bridge.make_ctx();
+            p.set_ctx(ctx);
+            p.bind_state(&self.bands, cfg_ptr);
+            p.call_update(elapsed);
+        }
+        for p in &self.plugins {
+            let out = p.call_transform(&render_bands);
+            // Time-smooth the plugin output (strong low-pass) into the render copy.
+            for i in 0..128 {
+                let v = out[i];
+                let s = self.plugin_smooth_bands[i];
+                let sm = if v > s { s * 0.7 + v * 0.3 } else { s * 0.9 + v * 0.1 };
+                self.plugin_smooth_bands[i] = sm;
+                render_bands[i] = sm;
+            }
+        }
+        self.render_plugin_textures();
         let spawn_scale = spawn_scale_for(&self.cfg, elapsed);
         let spawn_t = (elapsed / (self.cfg.spawn_duration.max(1.0) / 1000.0)).min(1.0);
         let spawn_effect = match self.cfg.spawn_effect {
@@ -914,7 +1005,7 @@ impl App {
         };
         let spawn_rot = (self.cfg.spawn_rotate * (1.0 - spawn_t)).to_radians();
         let rotate_rad = (self.cfg.rotate + self.cfg.auto_rotate * elapsed).to_radians();
-        let amp_avg = self.bands.iter().copied().sum::<f32>() / NBANDS as f32;
+        let amp_avg = render_bands.iter().copied().sum::<f32>() / NBANDS as f32;
         // Time-domain low-pass: the ring band follows the music smoothly, so the particle
         // orbit swells and settles gently instead of twitching in/out.
         self.ring_amp_smooth = self.ring_amp_smooth * 0.90 + amp_avg * 0.10;
@@ -940,12 +1031,14 @@ impl App {
         // each renderer owns its own atlas, so no shared queue that one monitor drains.
         for (ti, img) in self.texture_slots.iter().enumerate() {
             if let Some(img) = img {
-                log::info!("upload tex {}: {}x{}", ti, img.w, img.h);
                 if let Some((ux, uy, uw, uh)) = renderer.upload_texture(ti, &img.rgba, img.w, img.h) {
                     // find the widget slot(s) referencing this texture index
                     for s in 0..32 {
                         let wo = s * 40;
                         if (widgets[wo + 6] - ti as f32).abs() < 0.01 {
+                            if ti >= 8 {
+                                log::info!("plugin tex {} -> widget slot {} uv=({:.3},{:.3},{:.3},{:.3})", ti, s, ux, uy, uw, uh);
+                            }
                             widgets[wo + 7] = ux;
                             widgets[wo + 8] = uy;
                             widgets[wo + 9] = uw;
@@ -959,7 +1052,7 @@ impl App {
         renderer.set_widgets(&widgets);
         renderer.resize(width, height);
         renderer.set_auto_rotate(rotate_rad);
-        renderer.render(&self.bands, spawn_scale, spawn_effect, spawn_t, spawn_rot, &particles, elapsed);
+        renderer.render(&render_bands, spawn_scale, spawn_effect, spawn_t, spawn_rot, &particles, elapsed);
 
         let surface = layer.wl_surface();
         log::info!("draw_one({idx}) rendered {width}x{height}");

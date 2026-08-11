@@ -22,6 +22,8 @@ pub enum WidgetType {
     Cover,
     /// An analog (hand-dial) clock.
     Analog,
+    /// A plugin-rendered texture (the named Rust plugin draws into it each frame).
+    Plugin,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +72,8 @@ pub struct WidgetConfig {
     pub border_width: f32,
     /// Beat-scaling amplitude (0 = static).
     pub cover_growth: f32,
+    /// Plugin name for `type: "plugin"` widgets.
+    pub plugin: Option<String>,
     // ---- analog clock ----
     /// Number of hour ticks (12 or 24).
     pub tick_count: f32,
@@ -110,6 +114,7 @@ impl Default for WidgetConfig {
             bar_mirror: false,
             border_width: 0.004,
             cover_growth: 0.08,
+            plugin: None,
             tick_count: 12.0,
             dial_border: 0.004,
         }
@@ -626,6 +631,7 @@ fn parse_widget(obj: &[(String, Val)]) -> Option<WidgetConfig> {
                         "bars" | "bar" | "spectrum" => WidgetType::Bars,
                         "cover" | "album" | "art" => WidgetType::Cover,
                         "analog" | "clock2" | "handclock" => WidgetType::Analog,
+                        "plugin" | "custom" => WidgetType::Plugin,
                         _ => WidgetType::Ring,
                     };
                 }
@@ -639,6 +645,11 @@ fn parse_widget(obj: &[(String, Val)]) -> Option<WidgetConfig> {
             "source" | "src" => {
                 if let Val::Str(s) = v {
                     w.source = Some(s.clone());
+                }
+            }
+            "plugin" | "pluginName" => {
+                if let Val::Str(s) = v {
+                    w.plugin = Some(s.clone());
                 }
             }
             "color" | "colour" => {

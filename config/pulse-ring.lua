@@ -3,19 +3,21 @@
 
 local t = 0
 local ring_amp = 0
+local prev_sens = 1.0
+local prev_growth = 0.14
 
 function onUpdate(dt)
     t = t + dt
 
-    -- 整体能量（低通平滑）
+    -- 整体能量（强低通，抑制抖动）
     local energy = 0
     for i = 1, 128 do
         energy = energy + (bands[i] or 0)
     end
     energy = energy / 128
-    ring_amp = ring_amp * 0.92 + energy * 0.08
+    ring_amp = ring_amp * 0.97 + energy * 0.03
 
-    -- 粒子：统一轨道/速度
+    -- 粒子：统一轨道/速度（环绕星环）
     config.particleMode = "ring"
     local ps = {}
     for i = 1, 15 do
@@ -31,28 +33,32 @@ function onUpdate(dt)
     end
     config.particles = ps
 
-    -- 主环运动：幅度跟随能量
-    config.growth = 0.14 + ring_amp * 0.12
-    config.sensitivity = 1.0 + ring_amp * 0.8
-    config.decay = 0.82 + ring_amp * 0.1
-    config.smoothness = 0.9 + ring_amp * 0.2
+    -- 主环运动：温和跟随
+    local target_growth = 0.14 + ring_amp * 0.06
+    local target_sens = 1.0 + ring_amp * 0.3
+    prev_growth = prev_growth * 0.9 + target_growth * 0.1
+    prev_sens = prev_sens * 0.9 + target_sens * 0.1
+    config.growth = prev_growth
+    config.sensitivity = prev_sens
+    config.decay = 0.86
+    config.smoothness = 1.0
 
-    -- 内/中环运动幅度
-    config.innerGrowth = 0.05 + ring_amp * 0.08
-    config.midGrowth = 0.06 + ring_amp * 0.08
+    -- 内/中环运动（温和）
+    config.innerGrowth = 0.05 + ring_amp * 0.05
+    config.midGrowth = 0.06 + ring_amp * 0.05
 
-    -- 自转速度随音乐
-    config.autoRotate = 3.0 + ring_amp * 4.0
+    -- 自转速度（温和）
+    config.autoRotate = 3.0 + ring_amp * 2.0
 
-    -- 空闲呼吸（无音乐时）
+    -- 空闲呼吸
     config.idleBreathe = 0.04 + ring_amp * 0.02
 
-    -- 音频条幅度：动态调节
+    -- 音频条幅度（温和）
     if t > 0.5 then
         for i = 1, 20 do
             local w = pulse.getWidget(i)
             if w and w.type == "bars" then
-                pulse.setWidget(i, "barHeight", 0.04 + energy * 0.16)
+                pulse.setWidget(i, "barHeight", 0.05 + ring_amp * 0.10)
             end
         end
     end
@@ -65,15 +71,15 @@ function onUpdate(dt)
     end
 end
 
--- 低频增强 + 高频衰减
+-- 低频增强 + 高频衰减（温和）
 function transformBands(bands)
     local out = {}
     for i = 1, 128 do
         local v = bands[i]
         if i <= 32 then
-            v = v * 1.2
+            v = v * 1.1
         elseif i >= 96 then
-            v = v * 0.85
+            v = v * 0.9
         end
         out[i] = v
     end
