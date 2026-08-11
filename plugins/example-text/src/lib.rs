@@ -124,12 +124,14 @@ extern "C" fn on_update(ctx: *mut PluginCtx, _dt: f32) {
 }
 
 extern "C" fn transform_bands(_ctx: *mut PluginCtx, input: *const f32, out: *mut f32) {
-    // 演示：低频增益 1.2x，高频 0.8x（平滑，无抖动）
+    // 演示：中性变换（轻微平滑），不改增益——灵敏度由 config.sensitivity 统一控制
     for i in 0..128 {
         unsafe {
             let v = *input.add(i);
-            let gain = if i < 32 { 1.2 } else if i >= 96 { 0.8 } else { 1.0 };
-            *out.add(i) = v * gain;
+            // 3 点平均平滑（不放大）
+            let a = if i > 0 { *input.add(i - 1) } else { v };
+            let b = if i < 127 { *input.add(i + 1) } else { v };
+            *out.add(i) = (a + 2.0 * v + b) * 0.25;
         }
     }
 }

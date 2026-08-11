@@ -75,9 +75,7 @@ PulseRing {
             mirror: true; bandMode: "full"
             colorMode: "gradient"; colors: ["#00E5FF", "#69F0AE", "#7C4DFF", "#E040FB"]
         },
-            // 插件渲染（左下角：渐变圆，由 example-text 插件绘制，随低频膨胀）
-        Widget { type: "plugin"; plugin: "example-text"; x: 0.15; y: 0.8; size: 0.12; alpha: 1.0 }
-]
+    ]
 
     // ================= 全局 =================
     idleBreathe: 0.05

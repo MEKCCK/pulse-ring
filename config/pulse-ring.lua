@@ -71,19 +71,9 @@ function onUpdate(dt)
     end
 end
 
--- 低频增强 + 高频衰减（温和）
+-- 频段变换：中性（平滑处理交给引擎，灵敏度由 sensitivity 统一控制）
 function transformBands(bands)
-    local out = {}
-    for i = 1, 128 do
-        local v = bands[i]
-        if i <= 32 then
-            v = v * 1.1
-        elseif i >= 96 then
-            v = v * 0.9
-        end
-        out[i] = v
-    end
-    return out
+    return bands
 end
 
 log("pulse-ring lua 已加载")
