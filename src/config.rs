@@ -377,7 +377,13 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Embedded default QML/Lua configs (from the `config/` directory, kept in sync by CI/manually).
+    pub const DEFAULT_QML: &'static str = include_str!("../config/pulse-ring.qml");
+    pub const DEFAULT_LUA: &'static str = include_str!("../config/pulse-ring.lua");
+
     pub fn load(path: &Path) -> Self {
+        // First run: write the bundled default configs so the user can edit them.
+        ensure_defaults();
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
@@ -939,6 +945,35 @@ pub fn parse_for_test(src: &str) -> Config {
 
 /// Locate the config file: `$XDG_CONFIG_HOME/pulse-ring/pulse-ring.qml` (or
 /// `~/.config/...`), falling back to `./pulse-ring.qml`.
+/// Write the bundled default QML/Lua configs to ~/.config/pulse-ring/ on first run.
+fn ensure_defaults() {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
+        });
+    let dir = base.join("pulse-ring");
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    let qml = dir.join("pulse-ring.qml");
+    if !qml.exists() {
+        if let Err(e) = std::fs::write(&qml, Config::DEFAULT_QML) {
+            log::warn!("failed to write default config {}: {e}", qml.display());
+        } else {
+            log::info!("wrote default config to {}", qml.display());
+        }
+    }
+    let lua = dir.join("pulse-ring.lua");
+    if !lua.exists() {
+        if let Err(e) = std::fs::write(&lua, Config::DEFAULT_LUA) {
+            log::warn!("failed to write default lua {}: {e}", lua.display());
+        } else {
+            log::info!("wrote default lua to {}", lua.display());
+        }
+    }
+}
+
 pub fn config_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("PULSE_RING_CONFIG") {
         let p = std::path::PathBuf::from(p);

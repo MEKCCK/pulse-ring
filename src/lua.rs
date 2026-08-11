@@ -100,6 +100,12 @@ impl LuaState {
                         "size" => w.size = val,
                         "alpha" => w.alpha = val,
                         "rotate" => w.rotate = val,
+                        "barHeight" => w.bar_height = val,
+                        "barCount" => w.bar_count = val,
+                        "barGap" => w.bar_gap = val,
+                        "fontSize" => w.font_size = val,
+                        "borderWidth" => w.border_width = val,
+                        "coverGrowth" => w.cover_growth = val,
                         _ => {}
                     }
                 }
@@ -267,11 +273,47 @@ fn sync_config(lua: &Lua, cfg: &Config) -> mlua::Result<()> {
     })?;
     t.set("particleLoop", cfg.particle_loop)?;
     t.set("idleBreathe", cfg.idle_breathe)?;
+    // particles: expose as an array of tables so Lua can read/tweak them
+    let ps = lua.create_table()?;
+    for (i, p) in cfg.particles.iter().enumerate() {
+        let item = lua.create_table()?;
+        item.set("x", p.x)?;
+        item.set("y", p.y)?;
+        item.set("angle", p.angle)?;
+        item.set("speed", p.speed)?;
+        item.set("size", p.size)?;
+        item.set("life", p.life)?;
+        item.set("delay", p.delay)?;
+        item.set("twinkle", p.twinkle)?;
+        ps.set(i + 1, item)?;
+    }
+    t.set("particles", ps)?;
     Ok(())
 }
 
 fn read_config(lua: &Lua, cfg: &mut Config) -> mlua::Result<()> {
     let t: Table = lua.globals().get("config")?;
+    // particles: replace the whole array if Lua set it
+    if let Ok(ps) = t.get::<mlua::Table>("particles") {
+        let len = ps.len()?;
+        if len > 0 {
+            cfg.particles.clear();
+            for i in 1..=len {
+                if let Ok(pt) = ps.get::<mlua::Table>(i) {
+                    let mut p = crate::config::ParticleConfig::default();
+                    if let Ok(v) = pt.get::<f32>("x") { p.x = v; }
+                    if let Ok(v) = pt.get::<f32>("y") { p.y = v; }
+                    if let Ok(v) = pt.get::<f32>("angle") { p.angle = v; }
+                    if let Ok(v) = pt.get::<f32>("speed") { p.speed = v; }
+                    if let Ok(v) = pt.get::<f32>("size") { p.size = v; }
+                    if let Ok(v) = pt.get::<f32>("life") { p.life = v; }
+                    if let Ok(v) = pt.get::<f32>("delay") { p.delay = v; }
+                    if let Ok(v) = pt.get::<f32>("twinkle") { p.twinkle = v; }
+                    cfg.particles.push(p);
+                }
+            }
+        }
+    }
     if let Ok(v) = t.get::<f32>("baseRadius") { cfg.base_radius = v; }
     if let Ok(v) = t.get::<f32>("growth") { cfg.growth = v; }
     if let Ok(v) = t.get::<f32>("ringWidth") { cfg.ring_width = v; }
@@ -292,6 +334,14 @@ fn read_config(lua: &Lua, cfg: &mut Config) -> mlua::Result<()> {
     if let Ok(v) = t.get::<f32>("midWidth") { cfg.mid_width = v; }
     if let Ok(v) = t.get::<bool>("midRing") { cfg.mid_ring = v; }
     if let Ok(v) = t.get::<f32>("idleBreathe") { cfg.idle_breathe = v; }
+    if let Ok(s) = t.get::<String>("particleMode") {
+        cfg.particle_mode = match s.as_str() {
+            "burst" => crate::config::ParticleMode::Burst,
+            "orbit" => crate::config::ParticleMode::Orbit,
+            "ring" => crate::config::ParticleMode::Ring,
+            _ => crate::config::ParticleMode::None,
+        };
+    }
     if let Ok(v) = t.get::<f32>("corners") { cfg.corners = v; }
     if let Ok(v) = t.get::<f32>("spikiness") { cfg.spikiness = v; }
     if let Ok(v) = t.get::<f32>("rotate") { cfg.rotate = v; }
