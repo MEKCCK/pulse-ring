@@ -140,7 +140,7 @@ fn main() {
         image_cache: Vec::new(),
         font: std::sync::Arc::new(load_font()),
         clock_cache: std::array::from_fn(|_| (String::new(), 0, 0, 0)),
-        texture_slots: vec![None; 16],
+        texture_slots: vec![None; 8],
         widget_uvs: [(0.0, 0.0, 0.0, 0.0); 32],
         cover_rx: spawn_cover_thread(),
         last_cover_path: String::new(),
@@ -668,9 +668,7 @@ impl App {
     fn prepare_widgets(&mut self, width: u32, height: u32) -> [f32; 1280] {
         use crate::config::WidgetType;
         let mut data = [0.0f32; 1280];
-        // Slots 0..7 reserved for text widgets (keyed by widget slot index).
-        // Images/covers allocate from 8 onward.
-        let mut tex_index = 8u32;
+        let mut tex_index = 0u32;
         // Reserve slot 3 for the album cover (clocks/images use 0..2).
         self.cover_tex_index = 3;
         let widgets: Vec<crate::config::WidgetConfig> = self.cfg.widgets.iter().take(32).cloned().collect();
@@ -806,34 +804,11 @@ impl App {
                     }
                 }
                 WidgetType::Clock => {
-                    let txt = match &w.text {
-                        Some(t) => t
-                            .replace("{title}", &self.music.title)
-                            .replace("{artist}", &self.music.artist)
-                            .replace("{album}", &self.music.album),
-                        None => chrono_now(),
-                    };
+                    let txt = chrono_now();
                     let (cached_text, cw, ch, cached_tex) = &self.clock_cache[slot];
                     let (cw, ch) = (*cw, *ch);
-                    // Text widgets get a dedicated atlas slot (widget slot == tex index) so the
-                    // UV rect always matches its texture. Plain clocks share the global pool.
                     let mut ti = *cached_tex;
-                    if w.text.is_some() {
-                        data[o + 39] = 99.0; // text marker
-                        ti = slot as u32;
-                        if &txt != cached_text || cw == 0 {
-                            let img = fit_slot(rasterize_text(&self.font, &txt, w.font_size, w.color));
-                            let (iw, ih) = (img.w, img.h);
-                            self.texture_slots[ti as usize] = Some(img);
-                            self.clock_cache[slot] = (txt.clone(), iw, ih, ti);
-                            data[o + 11] = ih as f32 / iw as f32;
-                        } else {
-                            data[o + 11] = ch as f32 / cw as f32;
-                        }
-                        if tex_index <= ti {
-                            tex_index = ti + 1;
-                        }
-                    } else if &txt != cached_text || cw == 0 {
+                    if &txt != cached_text || cw == 0 {
                         // 3x supersampling: sharper text when downscaled on screen.
                         let img = fit_slot(rasterize_text(&self.font, &txt, w.font_size * 3.0, w.color));
                         let (iw, ih) = (img.w, img.h);

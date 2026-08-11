@@ -1209,18 +1209,13 @@ const SHADER_SRC: &str = stringify!(
                     }
                 }
             } else {
-                // Image / clock / text widget.
+                // Image / clock widget.
                 let uv_x = u.widgets[wo + 7u];
                 let uv_y = u.widgets[wo + 8u];
                 let uv_w = u.widgets[wo + 9u];
                 let uv_h = u.widgets[wo + 10u];
                 let aspect = u.widgets[wo + 11u];
-                let is_text = u.widgets[wo + 39u] == 99.0;
-                var half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
-                if (is_text) {
-                    // Text: display at texture pixel size (sharp), `size` is a multiplier.
-                    half = vec2<f32>(uv_w, uv_h) * 1024.0 * 0.5 * wsize;
-                }
+                let half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
                 if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
                     let uv = vec2<f32>(
                         uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,
