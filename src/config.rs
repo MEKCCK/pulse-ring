@@ -158,6 +158,8 @@ pub enum SpawnEffect {
     Expand,
     /// Zoom (same as expand for now; kept for forward compatibility).
     Zoom,
+    /// Magic-circle: rings unfold in a delayed wave with rotation + a travelling light ring.
+    Magic,
     None,
 }
 
@@ -298,6 +300,8 @@ pub struct Config {
     pub spawn_effect: SpawnEffect,
     pub spawn_duration: f32,
     pub spawn_ease: SpawnEase,
+    /// Extra rotation (degrees) applied during the spawn animation (magic effect).
+    pub spawn_rotate: f32,
     // ---- particles ----
     pub particle_mode: ParticleMode,
     pub particle_loop: bool,
@@ -351,6 +355,7 @@ impl Default for Config {
             spawn_effect: SpawnEffect::Expand,
             spawn_duration: 1400.0,
             spawn_ease: SpawnEase::OutCubic,
+            spawn_rotate: 0.0,
             particle_mode: ParticleMode::Burst,
             particle_loop: true,
             particles: vec![],

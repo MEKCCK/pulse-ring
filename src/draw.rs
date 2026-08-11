@@ -71,6 +71,9 @@ struct Uniforms {
     rotate: f32,          // 676
     // ---- spawn / particles ----
     spawn_scale: f32,     // 680
+    spawn_effect: u32,    // 684
+    spawn_t: f32,         // 688
+    spawn_rot: f32,       // 692
     particle_mode: u32,   // 684
     particle_loop: u32,   // 688
     // ---- appearance extras ----
@@ -140,7 +143,7 @@ impl RingRenderer {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ring uniforms"),
-            size: 10496,
+            size: 10512,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -154,7 +157,7 @@ impl RingRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU32::new(10496).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
+                        min_binding_size: NonZeroU32::new(10512).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
                     },
                     count: None,
                 },
@@ -382,6 +385,9 @@ impl RingRenderer {
         &mut self,
         bands: &[f32; NBANDS],
         spawn_scale: f32,
+        spawn_effect: u32,
+        spawn_t: f32,
+        spawn_rot: f32,
         particles: &[f32; 1152],
         now: f32,
     ) {
@@ -499,6 +505,9 @@ impl RingRenderer {
             spikiness: c.spikiness.clamp(0.0, 1.0),
             rotate: self.auto_rotate,
             spawn_scale: spawn_scale,
+            spawn_effect: spawn_effect,
+            spawn_t: spawn_t,
+            spawn_rot: spawn_rot,
             particle_mode: match c.particle_mode {
                 crate::config::ParticleMode::Burst => 1,
                 crate::config::ParticleMode::Orbit => 2,
@@ -615,6 +624,9 @@ const SHADER_SRC: &str = stringify!(
         spikiness: f32,
         rotate: f32,
         spawn_scale: f32,
+        spawn_effect: u32,
+        spawn_t: f32,
+        spawn_rot: f32,
         particle_mode: u32,
         particle_loop: u32,
         dash_count: f32,
@@ -832,6 +844,27 @@ const SHADER_SRC: &str = stringify!(
         return vec4<f32>(u.widgets[o], u.widgets[o + 1u], u.widgets[o + 2u], u.widgets[o + 3u]);
     }
 
+    // Per-ring spawn scale: magic effect unfolds rings in a delayed wave (outer first),
+    // with a travelling bright ring at the expanding front.
+    fn spawn_layer(t: f32, delay: f32) -> f32 {
+        if (u.spawn_effect != 3u) {
+            return u.spawn_scale;
+        }
+        let local = clamp((t - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
+        return 1.0 - (1.0 - local) * (1.0 - local) * (1.0 - local);
+    }
+
+    // Magic-circle front ring: a bright arc at the leading edge of the expanding layer.
+    fn magic_front(dist: f32, base: f32, t: f32, delay: f32) -> f32 {
+        if (u.spawn_effect != 3u || t < delay) {
+            return 0.0;
+        }
+        let local = clamp((t - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
+        let edge = base * (1.0 - (1.0 - local) * (1.0 - local) * (1.0 - local));
+        let front_w = max(base * 0.06, 6.0);
+        return exp(-abs(dist - edge) / front_w) * (1.0 - local);
+    }
+
     @fragment
     fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let min_d = min(u.resolution.x, u.resolution.y);
@@ -850,10 +883,21 @@ const SHADER_SRC: &str = stringify!(
         );
 
         // ---- outer shape (music-reactive, angle-mapped), scaled by spawn anim ----
-        let base_scaled = u.base_r * u.spawn_scale;
-        let inner_base_scaled = u.inner_base_r * u.spawn_scale;
-        let edge_out = ring_edge(dist, ang, amp, base_scaled, u.growth);
-        let ring_a = shape_ring_a(dist, ang, amp, base_scaled, u.growth, u.half_thick);
+        // Magic effect: rings unfold in a wave and the glyph rotates while spawning.
+        var ang_eff = ang;
+        if (u.spawn_effect == 3u) {
+            ang_eff = ang + u.spawn_rot * (1.0 - u.spawn_t);
+        }
+        let s_outer = spawn_layer(u.spawn_t, 0.0);
+        let s_mid = spawn_layer(u.spawn_t, 0.18);
+        let s_inner = spawn_layer(u.spawn_t, 0.36);
+        let base_scaled = u.base_r * s_outer;
+        let mid_base_scaled = u.mid_base_r * s_mid;
+        let inner_base_scaled = u.inner_base_r * s_inner;
+        let edge_out = ring_edge(dist, ang_eff, amp, base_scaled, u.growth);
+        let ring_a = shape_ring_a(dist, ang_eff, amp, base_scaled, u.growth, u.half_thick);
+        // Magic expanding-front light ring.
+        let front_a = magic_front(dist, u.base_r, u.spawn_t, 0.0);
 
         var halo_a = 0.0;
         if (dist > edge_out) {
@@ -861,8 +905,8 @@ const SHADER_SRC: &str = stringify!(
             halo_a = min(1.0, h_t * amp) * u.halo_strength;
         }
 
-        let mid_a = mid_ring_a(dist, ang);
-        let a = max(max(max(ring_a, halo_a), mid_a), inner_ring_a_scaled(dist, ang, inner_base_scaled)) * u.alpha;
+        let mid_a = shape_ring_a(dist, ang_eff, overall_energy(), mid_base_scaled, u.mid_growth, u.mid_half_thick) * f32(u.mid_enabled);
+        let a = max(max(max(ring_a, halo_a), mid_a), inner_ring_a_scaled(dist, ang_eff, inner_base_scaled)) * u.alpha;
 
         // Middle ring colour.
         let mid_present = mid_ring_a(dist, ang);
@@ -1229,12 +1273,15 @@ const SHADER_SRC: &str = stringify!(
         }
         let wa = min(w_a, 1.0);
 
-        // Composite: rings + saturn band + particles + widgets over transparent background (premultiplied).
+        // Composite: rings + magic front + saturn band + particles + widgets (premultiplied).
         let pa = min(p_a, 1.0);
         let sat_col = vec3<f32>(0.75, 0.85, 1.0);
-        let ring_alpha = min(a + sat_a + wa, 1.0);
-        let col = mix(rgb * a, sat_col, sat_a / max(a + sat_a, 0.0001)) * (a + sat_a) + p_col * (1.0 - ring_alpha) + w_col;
-        let alpha = a + sat_a + pa * (1.0 - min(a + sat_a, 1.0)) + wa * (1.0 - min(a + sat_a, 1.0));
+        let front_col = vec3<f32>(0.7, 0.8, 1.0) * front_a * u.alpha;
+        let front_alpha = front_a * u.alpha;
+        let ring_alpha = min(a + sat_a + front_alpha + wa, 1.0);
+        let base_col = mix(rgb * a, sat_col, sat_a / max(a + sat_a, 0.0001)) * (a + sat_a);
+        let col = base_col + front_col + p_col * (1.0 - ring_alpha) + w_col;
+        let alpha = a + sat_a + front_alpha + pa * (1.0 - min(a + sat_a, 1.0)) + wa * (1.0 - min(a + sat_a, 1.0));
         if (alpha <= 0.004) {
             return vec4<f32>(0.0, 0.0, 0.0, 0.0);
         }

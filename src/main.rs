@@ -905,6 +905,14 @@ impl App {
         self.bands = self.lua_state.transform_bands(&self.bands);
         self.lua_state.frame(&mut self.cfg, &self.bands, elapsed, &self.music);
         let spawn_scale = spawn_scale_for(&self.cfg, elapsed);
+        let spawn_t = (elapsed / (self.cfg.spawn_duration.max(1.0) / 1000.0)).min(1.0);
+        let spawn_effect = match self.cfg.spawn_effect {
+            crate::config::SpawnEffect::None => 0u32,
+            crate::config::SpawnEffect::Expand => 1u32,
+            crate::config::SpawnEffect::Zoom => 2u32,
+            crate::config::SpawnEffect::Magic => 3u32,
+        };
+        let spawn_rot = (self.cfg.spawn_rotate * (1.0 - spawn_t)).to_radians();
         let rotate_rad = (self.cfg.rotate + self.cfg.auto_rotate * elapsed).to_radians();
         let amp_avg = self.bands.iter().copied().sum::<f32>() / NBANDS as f32;
         // Time-domain low-pass: the ring band follows the music smoothly, so the particle
@@ -951,7 +959,7 @@ impl App {
         renderer.set_widgets(&widgets);
         renderer.resize(width, height);
         renderer.set_auto_rotate(rotate_rad);
-        renderer.render(&self.bands, spawn_scale, &particles, elapsed);
+        renderer.render(&self.bands, spawn_scale, spawn_effect, spawn_t, spawn_rot, &particles, elapsed);
 
         let surface = layer.wl_surface();
         log::info!("draw_one({idx}) rendered {width}x{height}");

@@ -273,6 +273,20 @@ fn sync_config(lua: &Lua, cfg: &Config) -> mlua::Result<()> {
     })?;
     t.set("particleLoop", cfg.particle_loop)?;
     t.set("idleBreathe", cfg.idle_breathe)?;
+    t.set("spawnEffect", match cfg.spawn_effect {
+        crate::config::SpawnEffect::None => "none",
+        crate::config::SpawnEffect::Expand => "expand",
+        crate::config::SpawnEffect::Zoom => "zoom",
+        crate::config::SpawnEffect::Magic => "magic",
+    })?;
+    t.set("spawnDuration", cfg.spawn_duration)?;
+    t.set("spawnEase", match cfg.spawn_ease {
+        crate::config::SpawnEase::OutCubic => "outCubic",
+        crate::config::SpawnEase::OutBack => "outBack",
+        crate::config::SpawnEase::Elastic => "elastic",
+        crate::config::SpawnEase::Bounce => "bounce",
+    })?;
+    t.set("spawnRotate", cfg.spawn_rotate)?;
     // particles: expose as an array of tables so Lua can read/tweak them
     let ps = lua.create_table()?;
     for (i, p) in cfg.particles.iter().enumerate() {
@@ -334,6 +348,24 @@ fn read_config(lua: &Lua, cfg: &mut Config) -> mlua::Result<()> {
     if let Ok(v) = t.get::<f32>("midWidth") { cfg.mid_width = v; }
     if let Ok(v) = t.get::<bool>("midRing") { cfg.mid_ring = v; }
     if let Ok(v) = t.get::<f32>("idleBreathe") { cfg.idle_breathe = v; }
+    if let Ok(v) = t.get::<f32>("spawnDuration") { cfg.spawn_duration = v; }
+    if let Ok(v) = t.get::<f32>("spawnRotate") { cfg.spawn_rotate = v; }
+    if let Ok(s) = t.get::<String>("spawnEffect") {
+        cfg.spawn_effect = match s.as_str() {
+            "none" => crate::config::SpawnEffect::None,
+            "zoom" => crate::config::SpawnEffect::Zoom,
+            "magic" => crate::config::SpawnEffect::Magic,
+            _ => crate::config::SpawnEffect::Expand,
+        };
+    }
+    if let Ok(s) = t.get::<String>("spawnEase") {
+        cfg.spawn_ease = match s.as_str() {
+            "outBack" => crate::config::SpawnEase::OutBack,
+            "elastic" => crate::config::SpawnEase::Elastic,
+            "bounce" => crate::config::SpawnEase::Bounce,
+            _ => crate::config::SpawnEase::OutCubic,
+        };
+    }
     if let Ok(s) = t.get::<String>("particleMode") {
         cfg.particle_mode = match s.as_str() {
             "burst" => crate::config::ParticleMode::Burst,
