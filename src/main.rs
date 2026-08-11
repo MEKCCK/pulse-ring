@@ -41,6 +41,7 @@ struct OutputSurfaces {
     height: u32,
     configured: bool,
     closed: bool,
+    frame_skip: u32,
 }
 
 struct App {
@@ -162,11 +163,25 @@ fn main() {
         last_music_poll: -10.0,
     };
 
-    loop {
+    // Wait for the first configure (outputs sized) via blocking dispatch, then switch to a
+    // timed render loop (~30 fps) so the compositor only recomposites on our updates.
+    let interval = std::time::Duration::from_millis(33);
+    while !app.outputs.iter().any(|o| o.width > 0) {
         event_queue.blocking_dispatch(&mut app).unwrap();
-        // Exit when every per-output surface has been closed.
+        if !app.outputs.is_empty() && app.outputs.iter().all(|o| o.closed) {
+            return;
+        }
+    }
+    loop {
+        let before = std::time::Instant::now();
+        event_queue.dispatch_pending(&mut app).unwrap();
+        app.tick();
         if !app.outputs.is_empty() && app.outputs.iter().all(|o| o.closed) {
             break;
+        }
+        let elapsed = before.elapsed();
+        if elapsed < interval {
+            std::thread::sleep(interval - elapsed);
         }
     }
 }
@@ -177,16 +192,9 @@ impl CompositorHandler for App {
     fn surface_enter(&mut self, _c: &Connection, _qh: &QueueHandle<Self>, _s: &wl_surface::WlSurface, _o: &wl_output::WlOutput) {}
     fn surface_leave(&mut self, _c: &Connection, _qh: &QueueHandle<Self>, _s: &wl_surface::WlSurface, _o: &wl_output::WlOutput) {}
 
-    fn frame(&mut self, _c: &Connection, qh: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _t: u32) {
-        // Find the output whose layer surface requested this frame callback.
-        let idx = self
-            .outputs
-            .iter()
-            .position(|o| o.layer.wl_surface() == surface);
-        log::info!("frame callback for {:?} -> idx {idx:?}", surface.id());
-        if let Some(idx) = idx {
-            self.draw_one(qh, idx);
-        }
+    fn frame(&mut self, _c: &Connection, _qh: &QueueHandle<Self>, _s: &wl_surface::WlSurface, _t: u32) {
+        // Rendering is driven by the timed tick() loop (~15 fps); frame callbacks are only
+        // used to keep the surface presented.
     }
 }
 
@@ -243,6 +251,7 @@ impl OutputHandler for App {
             height: 0,
             configured: false,
             closed: false,
+            frame_skip: 0,
         });
     }
 
@@ -282,8 +291,11 @@ impl LayerShellHandler for App {
             }
             let first = !o.configured;
             o.configured = true;
-            if first {
-                self.draw_one(qh, idx);
+            // Only the configured render target gets an initial draw; other screens stay
+            // blank (no buffer) so niri has nothing to composite for them.
+            let is_target = self.cfg.render_screen < 0 || self.cfg.render_screen == idx as i32;
+            if first && is_target {
+                let _ = qh; self.draw_one(idx);
             }
         }
     }
@@ -940,21 +952,36 @@ impl App {
         }
     }
 
+    /// Timed tick: render only the configured screen (or all if render_screen < 0).
+    fn tick(&mut self) {
+        self.pull_audio();
+        let target = self.cfg.render_screen;
+        if target >= 0 {
+            let idx = target as usize;
+            if idx < self.outputs.len() && !self.outputs[idx].closed && self.outputs[idx].width > 0 {
+                self.draw_one(idx);
+            }
+        } else {
+            for idx in 0..self.outputs.len() {
+                if !self.outputs[idx].closed && self.outputs[idx].width > 0 {
+                    self.draw_one(idx);
+                }
+            }
+        }
+    }
+
     fn pull_audio(&mut self) {
         while let Ok(b) = self.audio_rx.try_recv() {
             self.bands = b;
         }
     }
 
-    fn draw_one(&mut self, qh: &QueueHandle<Self>, idx: usize) {
-        self.pull_audio();
-
+    fn draw_one(&mut self, idx: usize) {
         let (layer, width, height, closed) = {
             let o = &mut self.outputs[idx];
             (o.layer.clone(), o.width, o.height, o.closed)
         };
         if closed || width == 0 || height == 0 {
-            log::info!("draw_one({idx}) SKIPPED: closed={closed} size={width}x{height}");
             return;
         }
 
@@ -1052,14 +1079,63 @@ impl App {
         renderer.set_widgets(&widgets);
         renderer.resize(width, height);
         renderer.set_auto_rotate(rotate_rad);
+        // Precompute 64 bar energies from the render bands (bars widgets look these up).
+        let mut bar_energy = [0.0f32; 64];
+        {
+            let n = render_bands.len();
+            for bi in 0..64 {
+                let lo = bi * n / 64;
+                let hi = ((bi + 1) * n / 64).max(lo + 1);
+                let mut acc = 0.0f32;
+                for i in lo..hi {
+                    acc += render_bands[i];
+                }
+                bar_energy[bi] = acc / (hi - lo) as f32;
+            }
+        }
+        renderer.set_bar_energy(&bar_energy);
+        // Overall energy (mid band mean) for the uniform-mode rings.
+        let overall = {
+            let mut acc = 0.0f32;
+            for i in 16..96 {
+                acc += render_bands[i];
+            }
+            acc / 80.0
+        };
+        renderer.set_overall_energy(overall);
+        let pcount = self.cfg.particles.len().min(32) as u32;
+        renderer.set_particle_count(pcount);
+        // Particle band centre (px): ring base + half growth + halo + typical offset.
+        let band_r = (self.cfg.base_radius + self.cfg.growth * 0.5 + self.cfg.halo_size * 0.5
+            + self.cfg.particles.first().map(|p| p.x).unwrap_or(0.012)) * (width.min(height) as f32);
+        renderer.set_particle_band(band_r);
+        renderer.set_render_scale(self.cfg.render_scale);
         renderer.render(&render_bands, spawn_scale, spawn_effect, spawn_t, spawn_rot, &particles, elapsed);
 
         let surface = layer.wl_surface();
-        log::info!("draw_one({idx}) rendered {width}x{height}");
-        // wgpu's present attaches a new buffer but may not mark it damaged; niri only
-        // recomposites damaged regions, so a missing damage freezes the surface on frame 1.
-        surface.damage_buffer(0, 0, width as i32, height as i32);
-        surface.frame(qh, FrameCallbackData(surface.clone()));
+        // Damage only the region where the rings/widgets actually live (centre band +
+        // widget zones) instead of the full frame — niri only recomposites damaged
+        // regions, so a full-screen damage makes the whole desktop re-composite every frame.
+        let dw = width as i32;
+        let dh = height as i32;
+        // rings occupy the central ~46% height; widgets live near edges — be generous but
+        // still far smaller than the full frame.
+        let rx0 = (dw / 2 - dw * 4 / 10).max(0);
+        let rx1 = (dw / 2 + dw * 4 / 10).min(dw);
+        let ry0 = (dh / 2 - dh * 4 / 10).max(0);
+        let ry1 = (dh / 2 + dh * 4 / 10).min(dh);
+        surface.damage_buffer(rx0, ry0, rx1 - rx0, ry1 - ry0);
+        // widgets near the edges
+        for s in 0..32 {
+            let wo = s * 40;
+            let wtype = widgets[wo];
+            if wtype > 0.5 && widgets[wo + 4] > 0.004 {
+                let wx = (widgets[wo + 1] * width as f32) as i32;
+                let wy = (widgets[wo + 2] * height as f32) as i32;
+                let ws = (widgets[wo + 3] * (width.min(height)) as f32) as i32;
+                surface.damage_buffer((wx - ws).max(0), (wy - ws).max(0), ws * 2, ws * 2);
+            }
+        }
         layer.commit();
     }
 }

@@ -26,6 +26,11 @@ pub struct RingRenderer {
     auto_rotate: f32,
     widget_data: [f32; 1280],
     widget_count: u32,
+    bar_energy_data: [f32; 64],
+    overall_energy_data: f32,
+    particle_count_data: u32,
+    particle_band_r_data: f32,
+    render_scale: f32,
     atlas_texture: Option<wgpu::Texture>,
     atlas_view: Option<wgpu::TextureView>,
     sampler: wgpu::Sampler,
@@ -93,6 +98,11 @@ struct Uniforms {
     // ---- widgets ----
     widget_count: u32,
     widgets: [f32; 1280],
+    // ---- precomputed bar energies (CPU side) ----
+    bar_energy: [f32; 64],
+    overall_energy_val: f32,
+    particle_count: u32,
+    particle_band_r: f32,
 }
 
 impl RingRenderer {
@@ -144,7 +154,7 @@ impl RingRenderer {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ring uniforms"),
-            size: 10528,
+            size: 10832,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -158,7 +168,7 @@ impl RingRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU32::new(10528).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
+                        min_binding_size: NonZeroU32::new(10832).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
                     },
                     count: None,
                 },
@@ -275,6 +285,11 @@ impl RingRenderer {
             auto_rotate: 0.0,
             widget_data: [0.0; 1280],
             widget_count: 0,
+            bar_energy_data: [0.0; 64],
+            overall_energy_data: 0.0,
+            particle_count_data: 0,
+            particle_band_r_data: 0.0,
+            render_scale: 1.0,
             atlas_texture: None,
             atlas_view: None,
             sampler: sampler.clone(),
@@ -285,6 +300,31 @@ impl RingRenderer {
     /// Snapshot of the loaded config (used for spawn/particle animation on the CPU side).
     pub fn config_ref(&self) -> &crate::config::Config {
         &self.ring_cfg
+    }
+
+    /// Precomputed bar energies (64 values, CPU-side) for the bars widgets.
+    pub fn set_bar_energy(&mut self, data: &[f32; 64]) {
+        self.bar_energy_data = *data;
+    }
+
+    /// Precomputed overall band energy (CPU-side, once per frame).
+    pub fn set_overall_energy(&mut self, v: f32) {
+        self.overall_energy_data = v;
+    }
+
+    /// Render resolution scale (0.25..1.0): lower = less GPU, compositor upscales.
+    pub fn set_render_scale(&mut self, s: f32) {
+        self.render_scale = s.clamp(0.25, 1.0);
+    }
+
+    /// Number of active particles (loops less than the fixed 32 capacity).
+    pub fn set_particle_count(&mut self, n: u32) {
+        self.particle_count_data = n.min(32);
+    }
+
+    /// Centre radius (px) of the particle band, for cheap rejection of pixels far from it.
+    pub fn set_particle_band(&mut self, r: f32) {
+        self.particle_band_r_data = r;
     }
 
     /// Current auto-rotation angle in radians (config rotate + autoRotate*time).
@@ -535,6 +575,10 @@ impl RingRenderer {
             particles: *particles,
             widget_count: self.widget_count,
             widgets: self.widget_data,
+            bar_energy: self.bar_energy_data,
+            overall_energy_val: self.overall_energy_data,
+            particle_count: self.particle_count_data,
+            particle_band_r: self.particle_band_r_data,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -644,6 +688,10 @@ const SHADER_SRC: &str = stringify!(
         particles: array<f32, 1152>,
         widget_count: u32,
         widgets: array<f32, 1280>,
+        bar_energy: array<f32, 64>,
+        overall_energy_val: f32,
+        particle_count: u32,
+        particle_band_r: f32,
     };
 
     @group(0) @binding(1) var widget_texture: texture_2d<f32>;
@@ -776,11 +824,7 @@ const SHADER_SRC: &str = stringify!(
 
     // Overall energy: mean of the mid-frequency bands, drives the middle ring.
     fn overall_energy() -> f32 {
-        var acc = 0.0;
-        for (var i = 16u; i < 96u; i = i + 1u) {
-            acc = acc + u.bands[i];
-        }
-        return acc / 80.0;
+        return u.overall_energy_val;
     }
 
     // Middle ring: constant-radius annulus scaling with overall energy.
@@ -859,7 +903,7 @@ const SHADER_SRC: &str = stringify!(
 
     // Magic-circle front ring: a bright arc at the leading edge of the expanding layer.
     fn magic_front(dist: f32, base: f32, t: f32, delay: f32) -> f32 {
-        if (u.spawn_effect != 3u || t < delay) {
+        if (u.spawn_effect != 3u || t < delay || t >= 1.0) {
             return 0.0;
         }
         let local = clamp((t - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
@@ -875,45 +919,54 @@ const SHADER_SRC: &str = stringify!(
         let d = in.pos.xy - centre;
         let dist = length(d);
 
-        var ang = atan2(d.y, d.x);
-        if (ang < 0.0) { ang = ang + 6.28318530718; }
-        // Spatial anti-aliasing along the ring: average amp over neighbouring angles so the
-        // outline deforms smoothly instead of jaggedly snapping between band values.
-        var amp = max(
-            (band_amp(ang) + band_amp(ang - 0.02) + band_amp(ang + 0.02)
-             + band_amp(ang - 0.045) + band_amp(ang + 0.045)) * 0.2,
-            idle_amp()
-        );
-        // Uniform mode: the outer ring scales as a whole like the mid/inner rings.
-        if (u.outer_uniform == 1u) {
-            amp = max(overall_energy(), idle_amp());
-        }
-
-        // ---- outer shape (music-reactive, angle-mapped), scaled by spawn anim ----
-        // Magic effect: rings unfold in a wave and the glyph rotates while spawning.
-        var ang_eff = ang;
-        if (u.spawn_effect == 3u) {
-            ang_eff = ang + u.spawn_rot * (1.0 - u.spawn_t);
-        }
-        let s_outer = spawn_layer(u.spawn_t, 0.0);
-        let s_mid = spawn_layer(u.spawn_t, 0.18);
-        let s_inner = spawn_layer(u.spawn_t, 0.36);
-        let base_scaled = u.base_r * s_outer;
-        let mid_base_scaled = u.mid_base_r * s_mid;
-        let inner_base_scaled = u.inner_base_r * s_inner;
-        let edge_out = ring_edge(dist, ang_eff, amp, base_scaled, u.growth);
-        let ring_a = shape_ring_a(dist, ang_eff, amp, base_scaled, u.growth, u.half_thick);
-        // Magic expanding-front light ring.
-        let front_a = magic_front(dist, u.base_r, u.spawn_t, 0.0);
-
+        // Fast reject: pixels far outside the outer ring + halo skip all ring math.
+        // (Only particles / widgets / background remain, which are much cheaper.)
+        let ring_max = u.base_r + u.growth + u.halo;
+        var ang = 0.0;
+        var amp = 0.0;
+        var ang_eff = 0.0;
+        var base_scaled = 0.0;
+        var mid_base_scaled = 0.0;
+        var inner_base_scaled = 0.0;
+        var edge_out = 0.0;
+        var ring_a = 0.0;
         var halo_a = 0.0;
-        if (dist > edge_out) {
-            let h_t = max(0.0, edge_out + u.halo - dist) / u.halo;
-            halo_a = min(1.0, h_t * amp) * u.halo_strength;
+        var mid_a = 0.0;
+        var front_a = 0.0;
+        var a = 0.0;
+        if (dist <= ring_max * min_d * 1.2 || u.spawn_t < 1.0) {
+            ang = atan2(d.y, d.x);
+            if (ang < 0.0) { ang = ang + 6.28318530718; }
+            amp = max(idle_amp(), 0.0);
+            if (u.outer_uniform == 1u) {
+                amp = max(overall_energy(), idle_amp());
+            } else {
+                amp = max(
+                    (band_amp(ang) + band_amp(ang - 0.02) + band_amp(ang + 0.02)
+                     + band_amp(ang - 0.045) + band_amp(ang + 0.045)) * 0.2,
+                    idle_amp()
+                );
+            }
+            ang_eff = ang;
+            if (u.spawn_effect == 3u) {
+                ang_eff = ang + u.spawn_rot * (1.0 - u.spawn_t);
+            }
+            let s_outer = spawn_layer(u.spawn_t, 0.0);
+            let s_mid = spawn_layer(u.spawn_t, 0.18);
+            let s_inner = spawn_layer(u.spawn_t, 0.36);
+            base_scaled = u.base_r * s_outer;
+            mid_base_scaled = u.mid_base_r * s_mid;
+            inner_base_scaled = u.inner_base_r * s_inner;
+            edge_out = ring_edge(dist, ang_eff, amp, base_scaled, u.growth);
+            ring_a = shape_ring_a(dist, ang_eff, amp, base_scaled, u.growth, u.half_thick);
+            front_a = magic_front(dist, u.base_r, u.spawn_t, 0.0);
+            if (dist > edge_out) {
+                let h_t = max(0.0, edge_out + u.halo - dist) / u.halo;
+                halo_a = min(1.0, h_t * amp) * u.halo_strength;
+            }
+            mid_a = shape_ring_a(dist, ang_eff, overall_energy(), mid_base_scaled, u.mid_growth, u.mid_half_thick) * f32(u.mid_enabled);
+            a = max(max(max(ring_a, halo_a), mid_a), inner_ring_a_scaled(dist, ang_eff, inner_base_scaled)) * u.alpha;
         }
-
-        let mid_a = shape_ring_a(dist, ang_eff, overall_energy(), mid_base_scaled, u.mid_growth, u.mid_half_thick) * f32(u.mid_enabled);
-        let a = max(max(max(ring_a, halo_a), mid_a), inner_ring_a_scaled(dist, ang_eff, inner_base_scaled)) * u.alpha;
 
         // Middle ring colour.
         let mid_present = mid_ring_a(dist, ang);
@@ -965,9 +1018,9 @@ const SHADER_SRC: &str = stringify!(
         // blow out to white; the ring mode has no trail ghosts to avoid self-overlap.
         var p_col = vec3<f32>(0.0);
         var p_a = 0.0;
-        if (u.particle_mode != 0u) {
+        if (u.particle_mode != 0u && abs(dist - u.particle_band_r) < min_d * 0.25) {
             let trail_max = select(1.0, 0.0, u.particle_mode == 3u);
-            for (var i = 0u; i < 96u; i = i + 1u) {
+            for (var i = 0u; i < u.particle_count; i = i + 1u) {
                 let o = i * 12u;
                 let px = u.particles[o];
                 let py = u.particles[o + 1u];
@@ -1105,15 +1158,19 @@ const SHADER_SRC: &str = stringify!(
                 let step = total_w / f32(bn);
                 let bar_w = step * (1.0 - bgap * 0.8);
                 let x0 = wpos.x - total_w * 0.5;
+                // Precomputed bar energies (CPU): 64 bins, index across the widget's band window.
+                var f_base = 0u;
+                var f_span = 128u;
+                if (wband == 1.0) { f_span = 32u; }
+                else if (wband == 2.0) { f_base = 32u; f_span = 64u; }
+                else if (wband == 3.0) { f_base = 96u; f_span = 32u; }
                 for (var bi = 0u; bi < bn; bi = bi + 1u) {
                     // bar centre starts half a bar in so the gaps are symmetric (visual centre
                     // stays at wpos.x).
                     let bx = x0 + bar_w * 0.5 + f32(bi) * step;
-                    // band energy for this bar
-                    let span = f_hi - f_lo;
-                    let b0 = u32(f_lo + span * (f32(bi) / f32(bn)));
-                    let b1 = u32(f_lo + span * (f32(bi + 1u) / f32(bn)));
-                    let e = band_energy(b0, b1);
+                    // lookup energy (no per-pixel band loop)
+                    let eidx = u32(f32(f_base) + f32(f_span) * (f32(bi) / f32(bn))) % 64u;
+                    let e = u.bar_energy[eidx];
                     let bh = e * bmax_h;
                     // bar rect SDF with anti-aliased edges:
                     // ex = distance to left/right edges, ey = distance to bottom edge,

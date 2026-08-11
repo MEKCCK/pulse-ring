@@ -18,6 +18,8 @@ PulseRing {
     baseRadius: 0.13
     growth: 0.20
     outerUniform: true     // 外环整体伸缩（与中/内环一致），不做角度扭曲
+    renderScreen: 0        // 只在第一个屏幕渲染（其他屏幕静态）
+
     haloStrength: 0.18
     haloSize: 0.12
     alpha: 1.0

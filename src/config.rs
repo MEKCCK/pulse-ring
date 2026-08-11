@@ -293,6 +293,10 @@ pub struct Config {
     /// Outer ring motion: "angle" = per-band distortion (default), "uniform" = overall scale
     /// like the mid/inner rings.
     pub outer_uniform: bool,
+    /// Render resolution scale (0.25 = quarter res, 4x less GPU). Compositor upscales.
+    pub render_scale: f32,
+    /// Index of the output to render on (-1 = all outputs). Others stay static.
+    pub render_screen: i32,
     pub mid_width: f32,
     pub mid_color: [f32; 4],
     // ---- particles ----
@@ -354,6 +358,8 @@ impl Default for Config {
             mid_growth: 0.10,
             mid_width: 3.5,
             outer_uniform: false,
+            render_scale: 1.0,
+            render_screen: -1,
             mid_color: [0.576, 0.545, 0.60, 0.75], // MD3 Secondary #938F99
             saturn_band: 0.028,
             saturn_alpha: 0.30,
@@ -927,6 +933,8 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
                     "saturnStripes" => cfg.saturn_stripes = n,
                     "midRing" => cfg.mid_ring = n > 0.0,
                     "outerUniform" => cfg.outer_uniform = n > 0.0,
+                    "renderScale" => cfg.render_scale = n.clamp(0.25, 1.0),
+                    "renderScreen" => cfg.render_screen = n as i32,
                     "midRadius" => cfg.mid_radius = n,
                     "midGrowth" => cfg.mid_growth = n,
                     "midWidth" => cfg.mid_width = n,
