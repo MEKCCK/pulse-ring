@@ -7,6 +7,112 @@
 
 use std::path::Path;
 
+/// A placed widget on the wallpaper layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidgetType {
+    /// The music-reactive ring (uses the global style settings).
+    Ring,
+    /// A static image (PNG), `source` required.
+    Image,
+    /// A clock showing the current time.
+    Clock,
+    /// A vertical spectrum bar visualiser.
+    Bars,
+}
+
+#[derive(Debug, Clone)]
+pub struct WidgetConfig {
+    pub widget_type: WidgetType,
+    /// Position as a fraction of the screen (0.5 = centre).
+    pub x: f32,
+    pub y: f32,
+    /// Scale multiplier (1.0 = normal size).
+    pub size: f32,
+    /// Opacity 0..1.
+    pub alpha: f32,
+    /// Rotation in degrees.
+    pub rotate: f32,
+    /// Image file path (image widgets).
+    pub source: Option<String>,
+    /// Text colour (clock widgets), RGBA.
+    pub color: [f32; 4],
+    /// Font size in pixels (clock widgets).
+    pub font_size: f32,
+    // ---- ring widget style (independent per widget) ----
+    pub shape: Shape,
+    pub corners: f32,
+    pub spikiness: f32,
+    pub color_mode: ColorMode,
+    pub colors: Vec<[f32; 4]>,
+    pub ring_width: f32,
+    pub base_radius: f32,
+    pub growth: f32,
+    pub halo_strength: f32,
+    pub halo_size: f32,
+    pub dash_count: f32,
+    pub dash_ratio: f32,
+    pub ring_alpha: f32,
+    /// Show mid/inner rings on this ring widget too.
+    pub with_rings: bool,
+    /// Which frequency band this ring responds to.
+    pub band_mode: BandMode,
+    // ---- bars widget ----
+    pub bar_count: f32,
+    pub bar_height: f32,
+    pub bar_gap: f32,
+    pub bar_mirror: bool,
+}
+
+impl Default for WidgetConfig {
+    fn default() -> Self {
+        Self {
+            widget_type: WidgetType::Ring,
+            x: 0.5,
+            y: 0.5,
+            size: 1.0,
+            alpha: 1.0,
+            rotate: 0.0,
+            source: None,
+            color: [1.0, 1.0, 1.0, 1.0],
+            font_size: 48.0,
+            shape: Shape::Ring,
+            corners: 5.0,
+            spikiness: 0.35,
+            color_mode: ColorMode::Hue,
+            colors: vec![],
+            ring_width: 6.0,
+            base_radius: 0.13,
+            growth: 0.18,
+            halo_strength: 0.18,
+            halo_size: 0.12,
+            dash_count: 0.0,
+            dash_ratio: 0.75,
+            ring_alpha: 1.0,
+            with_rings: false,
+            band_mode: BandMode::Full,
+            bar_count: 32.0,
+            bar_height: 0.15,
+            bar_gap: 0.25,
+            bar_mirror: false,
+        }
+    }
+}
+
+/// Which part of the spectrum a ring widget reacts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BandMode {
+    /// Full spectrum, angle-mapped (default).
+    Full,
+    /// Low frequencies (bass).
+    Bass,
+    /// Mid frequencies.
+    Mid,
+    /// High frequencies (treble).
+    Treble,
+    /// Overall energy (uniform breathing, "power meter" style).
+    Energy,
+}
+
 /// The shape of the music-reactive outline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
@@ -163,6 +269,9 @@ pub struct Config {
     pub mid_color: [f32; 4],
     // ---- particles ----
     pub particle_shape: ParticleShape,
+    // ---- widgets ----
+    /// Extra placed widgets (rings / images / clocks). The main ring is always widget[0].
+    pub widgets: Vec<WidgetConfig>,
     // ---- spawn effect ----
     pub spawn_effect: SpawnEffect,
     pub spawn_duration: f32,
@@ -194,40 +303,46 @@ impl Default for Config {
         Self {
             shape: Shape::Ring,
             corners: 5.0,
-            spikiness: 0.4,
+            spikiness: 0.35,
             rotate: 0.0,
             inner_ring: true,
-            inner_radius: 0.55,
-            inner_growth: 0.10,
-            inner_width: 4.0,
-            inner_color: [0.0, 0.9, 0.85, 1.0],
+            inner_radius: 0.58,
+            inner_growth: 0.08,
+            inner_width: 5.0,
+            inner_color: [0.918, 0.847, 1.0, 0.9], // MD3 PrimaryContainer #EADDFF
             dash_count: 0.0,
             dash_ratio: 0.8,
             auto_rotate: 0.0,
             idle_breathe: 0.0,
             inner_alpha: 1.0,
             mid_ring: true,
-            mid_radius: 0.80,
-            mid_growth: 0.12,
-            mid_width: 3.0,
-            mid_color: [1.0, 0.62, 0.16, 0.85],
-            saturn_band: 0.0,
-            saturn_alpha: 0.32,
+            mid_radius: 0.78,
+            mid_growth: 0.10,
+            mid_width: 3.5,
+            mid_color: [0.576, 0.545, 0.60, 0.75], // MD3 Secondary #938F99
+            saturn_band: 0.028,
+            saturn_alpha: 0.30,
             saturn_stripes: 0.35,
             particle_shape: ParticleShape::Circle,
+            widgets: vec![],
             spawn_effect: SpawnEffect::Expand,
-            spawn_duration: 1200.0,
-            spawn_ease: SpawnEase::OutBack,
+            spawn_duration: 1400.0,
+            spawn_ease: SpawnEase::OutCubic,
             particle_mode: ParticleMode::Burst,
             particle_loop: true,
             particles: vec![],
-            color_mode: ColorMode::Hue,
-            colors: vec![],
-            ring_width: 6.0,
-            base_radius: 0.13,
-            growth: 0.20,
-            halo_strength: 0.25,
-            halo_size: 0.14,
+            color_mode: ColorMode::Gradient,
+            colors: vec![
+                [0.404, 0.314, 0.643, 1.0], // MD3 Primary #6750A4
+                [0.490, 0.322, 0.376, 1.0], // MD3 Tertiary #7D5260
+                [0.816, 0.737, 1.0, 1.0],   // MD3 PrimaryContainer 亮 #D0BCFF
+                [0.918, 0.847, 1.0, 1.0],   // MD3 PrimaryContainer #EADDFF
+            ],
+            ring_width: 7.0,
+            base_radius: 0.135,
+            growth: 0.18,
+            halo_strength: 0.18,
+            halo_size: 0.12,
             alpha: 1.0,
             sensitivity: 1.0,
             decay: 0.86,
@@ -459,6 +574,113 @@ fn parse_colour(s: &str) -> Option<[f32; 4]> {
     Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0])
 }
 
+fn parse_widget(obj: &[(String, Val)]) -> Option<WidgetConfig> {
+    let mut w = WidgetConfig::default();
+    for (k, v) in obj {
+        match k.as_str() {
+            "type" => {
+                if let Val::Str(s) = v {
+                    w.widget_type = match s.to_ascii_lowercase().as_str() {
+                        "image" => {
+                            w.size = 0.2; // default: 20% of shorter edge wide
+                            WidgetType::Image
+                        }
+                        "clock" => {
+                            w.size = 0.12; // default: ~130px on 1080p
+                            WidgetType::Clock
+                        }
+                        "bars" | "bar" | "spectrum" => WidgetType::Bars,
+                        _ => WidgetType::Ring,
+                    };
+                }
+            }
+            "x" => w.x = num(v)?,
+            "y" => w.y = num(v)?,
+            "size" | "scale" => w.size = num(v)?,
+            "alpha" | "opacity" => w.alpha = num(v)?,
+            "rotate" | "rotation" => w.rotate = num(v)?,
+            "fontSize" => w.font_size = num(v)?,
+            "source" | "src" => {
+                if let Val::Str(s) = v {
+                    w.source = Some(s.clone());
+                }
+            }
+            "color" | "colour" => {
+                if let Val::Str(s) = v {
+                    if let Some(c) = parse_colour(s) {
+                        w.color = c;
+                    }
+                }
+            }
+            "shape" => {
+                if let Val::Str(s) = v {
+                    w.shape = match s.to_ascii_lowercase().as_str() {
+                        "square" => Shape::Square,
+                        "diamond" => Shape::Diamond,
+                        "hexagon" => Shape::Hexagon,
+                        "triangle" => Shape::Triangle,
+                        "star" => Shape::Star,
+                        "flower" => Shape::Flower,
+                        _ => Shape::Ring,
+                    };
+                }
+            }
+            "colorMode" => {
+                if let Val::Str(s) = v {
+                    w.color_mode = match s.to_ascii_lowercase().as_str() {
+                        "solid" => ColorMode::Solid,
+                        "gradient" => ColorMode::Gradient,
+                        _ => ColorMode::Hue,
+                    };
+                }
+            }
+            "colors" => {
+                if let Val::Arr(items) = v {
+                    w.colors.clear();
+                    for it in items {
+                        if let Val::Str(s) = it {
+                            if let Some(c) = parse_colour(s) {
+                                w.colors.push(c);
+                            }
+                        }
+                    }
+                    if !w.colors.is_empty() {
+                        w.color_mode = ColorMode::Gradient;
+                    }
+                }
+            }
+            "corners" => w.corners = num(v)?,
+            "spikiness" => w.spikiness = num(v)?,
+            "ringWidth" => w.ring_width = num(v)?,
+            "baseRadius" => w.base_radius = num(v)?,
+            "growth" => w.growth = num(v)?,
+            "haloStrength" => w.halo_strength = num(v)?,
+            "haloSize" => w.halo_size = num(v)?,
+            "dashCount" => w.dash_count = num(v)?,
+            "dashRatio" => w.dash_ratio = num(v)?,
+            "ringAlpha" => w.ring_alpha = num(v)?,
+            "withRings" => w.with_rings = num(v)? > 0.0,
+            "bars" | "barCount" => w.bar_count = num(v)?,
+            "barHeight" => w.bar_height = num(v)?,
+            "barGap" => w.bar_gap = num(v)?,
+            "mirror" => w.bar_mirror = num(v)? > 0.0,
+            "bandMode" => {
+                if let Val::Str(s) = v {
+                    w.band_mode = match s.to_ascii_lowercase().as_str() {
+                        "bass" | "low" => BandMode::Bass,
+                        "mid" | "middle" => BandMode::Mid,
+                        "treble" | "high" => BandMode::Treble,
+                        "energy" | "power" => BandMode::Energy,
+                        _ => BandMode::Full,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(w)
+}
+
 fn parse_particle(obj: &[(String, Val)]) -> Option<ParticleConfig> {
     let mut p = ParticleConfig::default();
     for (k, v) in obj {
@@ -577,6 +799,38 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
                 };
             }
         }
+        "colors" | "gradient" => {
+            if let Val::Arr(items) = v {
+                cfg.colors.clear();
+                for it in items {
+                    if let Val::Str(s) = it {
+                        if let Some(c) = parse_colour(s) {
+                            cfg.colors.push(c);
+                        }
+                    }
+                }
+                if !cfg.colors.is_empty() {
+                    cfg.color_mode = ColorMode::Gradient;
+                }
+            } else if let Val::Str(s) = v {
+                if let Some(c) = parse_colour(s) {
+                    cfg.colors = vec![c];
+                    cfg.color_mode = ColorMode::Gradient;
+                }
+            }
+        }
+        "widgets" => {
+            if let Val::Arr(items) = v {
+                cfg.widgets.clear();
+                for it in items {
+                    if let Val::Obj(obj) = it {
+                        if let Some(w) = parse_widget(obj) {
+                            cfg.widgets.push(w);
+                        }
+                    }
+                }
+            }
+        }
         "particles" => {
             if let Val::Arr(items) = v {
                 cfg.particles.clear();
@@ -642,6 +896,11 @@ fn parse(src: &str) -> Result<Config, String> {
         }
     }
     Ok(cfg)
+}
+
+/// Test helper: parse a QML string directly.
+pub fn parse_for_test(src: &str) -> Config {
+    parse(src).unwrap_or_default()
 }
 
 /// Locate the config file: `$XDG_CONFIG_HOME/pulse-ring/pulse-ring.qml` (or

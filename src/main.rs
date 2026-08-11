@@ -57,6 +57,12 @@ struct App {
     adapter: wgpu::Adapter,
     display_handle: RawDisplayHandle,
     outputs: Vec<OutputSurfaces>,
+    image_cache: Vec<(String, std::sync::Arc<ImageData>)>,
+    font: std::sync::Arc<rusttype::Font<'static>>,
+    // Per-widget clock cache: (last_text, tex_w, tex_h, tex_index)
+    clock_cache: [(String, u32, u32, u32); 8],
+    pending_textures: Vec<(usize, ImageData)>,
+    widget_uvs: [(f32, f32, f32, f32); 32],
 }
 
 fn main() {
@@ -117,6 +123,11 @@ fn main() {
         adapter,
         display_handle: raw_display_handle,
         outputs: Vec::new(),
+        image_cache: Vec::new(),
+        font: std::sync::Arc::new(load_font()),
+        clock_cache: std::array::from_fn(|_| (String::new(), 0, 0, 0)),
+        pending_textures: Vec::new(),
+        widget_uvs: [(0.0, 0.0, 0.0, 0.0); 32],
     };
 
     loop {
@@ -409,7 +420,292 @@ fn vec2_angle(a: f32) -> (f32, f32) {
     (a.cos(), a.sin())
 }
 
+
+/// Current time as "HH:MM" (system local time, no chrono dependency).
+/// Current local time as two lines: "HH:MM\nMM-DD" (libc localtime_r, system timezone).
+fn chrono_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let t = now;
+    unsafe {
+        libc::localtime_r(&t, &mut tm);
+    }
+    format!(
+        "{:02}:{:02}\n{:02}-{:02}",
+        tm.tm_hour, tm.tm_min, tm.tm_mon + 1, tm.tm_mday
+    )
+}
+
+
+/// Simple RGBA image holder.
+#[derive(Clone)]
+struct ImageData {
+    w: u32,
+    h: u32,
+    rgba: Vec<u8>,
+}
+
+/// Load a system font for clock rendering (Noto Sans, fallback DejaVu).
+fn load_font() -> rusttype::Font<'static> {
+    let candidates = [
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/noto/NotoSans-SemiBold.ttf",
+    ];
+    for p in candidates {
+        if let Ok(data) = std::fs::read(p) {
+            if let Some(f) = rusttype::Font::try_from_vec(data) {
+                return f;
+            }
+        }
+    }
+    panic!("no usable system font found");
+}
+
+/// Decode a PNG file to RGBA.
+fn load_png(path: &str) -> Option<ImageData> {
+    let data = std::fs::read(path).ok()?;
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let w = info.width;
+    let h = info.height;
+    let bytes = &buf[..info.buffer_size()];
+    let (rgba, w, h) = match info.color_type {
+        png::ColorType::Rgba => (bytes.to_vec(), w, h),
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(bytes.len() / 3 * 4);
+            for c in bytes.chunks_exact(3) {
+                out.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+            (out, w, h)
+        }
+        png::ColorType::Grayscale => {
+            let mut out = Vec::with_capacity(bytes.len() * 4);
+            for &g in bytes {
+                out.extend_from_slice(&[g, g, g, 255]);
+            }
+            (out, w, h)
+        }
+        _ => return None,
+    };
+    Some(ImageData { w, h, rgba })
+}
+
+/// Scale an image down (bilinear-ish) to fit a 256x256 atlas slot, keeping aspect.
+fn fit_slot(img: ImageData) -> ImageData {
+    const MAX: u32 = 256;
+    if img.w <= MAX && img.h <= MAX {
+        return img;
+    }
+    let scale = (MAX as f32 / img.w as f32).min(MAX as f32 / img.h as f32);
+    let nw = ((img.w as f32 * scale).floor() as u32).max(1);
+    let nh = ((img.h as f32 * scale).floor() as u32).max(1);
+    let mut out = ImageData { w: nw, h: nh, rgba: vec![0u8; (nw * nh * 4) as usize] };
+    for y in 0..nh {
+        for x in 0..nw {
+            let sx = ((x as f32 + 0.5) / scale - 0.5).max(0.0) as usize;
+            let sy = ((y as f32 + 0.5) / scale - 0.5).max(0.0) as usize;
+            let si = (sy * img.w as usize + sx) * 4;
+            let di = ((y * nw + x) * 4) as usize;
+            out.rgba[di..di + 4].copy_from_slice(&img.rgba[si..si + 4]);
+        }
+    }
+    out
+}
+
+/// Rasterise a text string (may contain '\n' lines) to RGBA at the given font size.
+fn rasterize_text(font: &rusttype::Font, text: &str, size_px: f32, color: [f32; 4]) -> ImageData {
+    let scale = rusttype::Scale { x: size_px, y: size_px };
+    let v_metrics = font.v_metrics(scale);
+    let line_h = (v_metrics.ascent - v_metrics.descent).ceil() as u32;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut g_w = 1u32;
+    for line in &lines {
+        let w: u32 = font
+            .layout(line, scale, rusttype::point(0.0, 0.0))
+            .map(|g| g.unpositioned().h_metrics().advance_width.ceil() as u32)
+            .sum();
+        g_w = g_w.max(w);
+    }
+    let g_h = (line_h * lines.len() as u32).max(1);
+    let mut img = ImageData { w: g_w, h: g_h, rgba: vec![0u8; (g_w * g_h * 4) as usize] };
+    let (cr, cg, cb, ca) = (color[0], color[1], color[2], color[3]);
+    for (li, line) in lines.iter().enumerate() {
+        let y_base = (li as u32 * line_h) as f32;
+        let glyphs: Vec<rusttype::PositionedGlyph> = font
+            .layout(line, scale, rusttype::point(0.0, v_metrics.ascent + y_base))
+            .collect();
+        for g in &glyphs {
+            if let Some(bb) = g.pixel_bounding_box() {
+                g.draw(|x, y, cov| {
+                    let px = bb.min.x as u32 + x;
+                    let py = bb.min.y as u32 + y;
+                    if px < img.w && py < img.h {
+                        let a = cov * ca;
+                        let o = ((py * img.w + px) * 4) as usize;
+                        img.rgba[o] = (cr * 255.0 * a) as u8;
+                        img.rgba[o + 1] = (cg * 255.0 * a) as u8;
+                        img.rgba[o + 2] = (cb * 255.0 * a) as u8;
+                        img.rgba[o + 3] = (a * 255.0) as u8;
+                    }
+                });
+            }
+        }
+    }
+    img
+}
+
 impl App {
+    /// Compute widget uniform data (12 f32 each). Returns the 96-float layout.
+    fn prepare_widgets(&mut self, width: u32, height: u32) -> [f32; 1280] {
+        use crate::config::WidgetType;
+        let mut data = [0.0f32; 1280];
+        let mut tex_index = 0u32;
+        let widgets: Vec<crate::config::WidgetConfig> = self.cfg.widgets.iter().take(32).cloned().collect();
+        for (slot, w) in widgets.iter().enumerate() {
+            let o = slot * 40;
+            data[o] = match w.widget_type {
+                WidgetType::Ring => 0.0,
+                WidgetType::Image => 1.0,
+                WidgetType::Clock => 2.0,
+                WidgetType::Bars => 3.0,
+            };
+            data[o + 1] = w.x;
+            data[o + 2] = w.y;
+            data[o + 3] = w.size;
+            data[o + 4] = w.alpha;
+            data[o + 5] = w.rotate.to_radians();
+            let (cux, cuy, cuw, cuh) = self.widget_uvs[slot];
+            data[o + 7] = cux;
+            data[o + 8] = cuy;
+            data[o + 9] = cuw;
+            data[o + 10] = cuh;
+            // ring widget style
+            data[o + 12] = match w.shape {
+                crate::config::Shape::Ring => 0.0,
+                crate::config::Shape::Square => 1.0,
+                crate::config::Shape::Diamond => 2.0,
+                crate::config::Shape::Hexagon => 3.0,
+                crate::config::Shape::Triangle => 4.0,
+                crate::config::Shape::Star => 5.0,
+                crate::config::Shape::Flower => 6.0,
+            };
+            data[o + 13] = w.corners.max(2.0);
+            data[o + 14] = w.spikiness.clamp(0.0, 1.0);
+            data[o + 15] = match w.color_mode {
+                crate::config::ColorMode::Hue => 0.0,
+                crate::config::ColorMode::Solid => 1.0,
+                crate::config::ColorMode::Gradient => 2.0,
+            };
+            data[o + 16] = w.dash_count.max(0.0);
+            data[o + 17] = w.dash_ratio.clamp(0.0, 1.0);
+            data[o + 18] = w.ring_width.max(1.0);
+            data[o + 19] = w.base_radius.max(0.01);
+            data[o + 20] = w.growth.max(0.0);
+            data[o + 21] = w.halo_strength.clamp(0.0, 1.0);
+            data[o + 22] = w.halo_size.max(0.0);
+            data[o + 39] = match w.band_mode {
+                crate::config::BandMode::Full => 0.0,
+                crate::config::BandMode::Bass => 1.0,
+                crate::config::BandMode::Mid => 2.0,
+                crate::config::BandMode::Treble => 3.0,
+                crate::config::BandMode::Energy => 4.0,
+            };
+            // palette at 23..39
+            let pal = if w.colors.len() >= 4 {
+                &w.colors[..4]
+            } else if w.colors.len() >= 1 {
+                &w.colors[..1]
+            } else {
+                &[[0.404, 0.314, 0.643, 1.0]]
+            };
+            for (ci, col) in pal.iter().enumerate() {
+                let co = o + 23 + ci * 4;
+                data[co] = col[0];
+                data[co + 1] = col[1];
+                data[co + 2] = col[2];
+                data[co + 3] = col[3];
+            }
+            match w.widget_type {
+                WidgetType::Ring => {
+                    data[o + 6] = 0.0;
+                    data[o + 7] = 0.0;
+                    data[o + 8] = 0.0;
+                }
+                WidgetType::Bars => {
+                    // Reuse style slots: 18=bars count, 19=max height, 20=gap, 21=mirror.
+                    data[o + 18] = w.bar_count.clamp(2.0, 64.0);
+                    data[o + 19] = w.bar_height.max(0.01);
+                    data[o + 20] = w.bar_gap.clamp(0.0, 0.9);
+                    data[o + 21] = w.bar_mirror as u32 as f32;
+                }
+                WidgetType::Image => {
+                    let src = match &w.source {
+                        Some(s) => s.clone(),
+                        None => continue,
+                    };
+                    let img = self.get_image(&src).cloned();
+                    if let Some(img) = img {
+                        let img = fit_slot(img);
+                        let (iw, ih) = (img.w as f32, img.h as f32);
+                        data[o + 6] = tex_index as f32;
+                        data[o + 11] = ih / iw; // aspect
+                        self.pending_textures.push((tex_index as usize, img));
+                        tex_index += 1;
+                    }
+                }
+                WidgetType::Clock => {
+                    let txt = chrono_now();
+                    let (cached_text, cw, ch, cached_tex) = &self.clock_cache[slot];
+                    let (cw, ch) = (*cw, *ch);
+                    let mut ti = *cached_tex;
+                    if &txt != cached_text || cw == 0 {
+                        let img = rasterize_text(&self.font, &txt, w.font_size, w.color);
+                        let (iw, ih) = (img.w, img.h);
+                        ti = tex_index;
+                        self.pending_textures.push((ti as usize, img));
+                        self.clock_cache[slot] = (txt.clone(), iw, ih, ti);
+                        let (cw, ch) = (iw, ih);
+                        data[o + 11] = ch as f32 / cw as f32;
+                    } else {
+                        ti = *cached_tex;
+                        data[o + 11] = ch as f32 / cw as f32;
+                    }
+                    data[o + 6] = ti as f32;
+                    if ti >= tex_index {
+                        tex_index = ti + 1;
+                    }
+                }
+            }
+        }
+        log::info!("widgets: configured={} data[0..12]={:?}", self.cfg.widgets.len(), &data[..12]);
+        for (si, w) in widgets.iter().enumerate() {
+            if w.widget_type == crate::config::WidgetType::Image {
+                log::info!("image widget slot={} data={:?}", si, &data[si * 40..si * 40 + 24]);
+            }
+        }
+        data
+    }
+
+    fn get_image(&mut self, path: &str) -> Option<&ImageData> {
+        // Simple cache; expand ~ in path.
+        let expanded = path.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1);
+        if let Some(pos) = self.image_cache.iter().position(|(p, _)| *p == expanded) {
+            return Some(&self.image_cache[pos].1);
+        }
+        if let Some(img) = load_png(&expanded) {
+            self.image_cache.push((expanded, std::sync::Arc::new(img)));
+            return self.image_cache.last().map(|(_, d)| d.as_ref());
+        }
+        None
+    }
+
     fn pull_audio(&mut self) {
         while let Ok(b) = self.audio_rx.try_recv() {
             self.bands = b;
@@ -419,15 +715,9 @@ impl App {
     fn draw_one(&mut self, qh: &QueueHandle<Self>, idx: usize) {
         self.pull_audio();
 
-        let (layer, renderer, width, height, closed) = {
+        let (layer, width, height, closed) = {
             let o = &mut self.outputs[idx];
-            (
-                o.layer.clone(),
-                &mut o.renderer,
-                o.width,
-                o.height,
-                o.closed,
-            )
+            (o.layer.clone(), o.width, o.height, o.closed)
         };
         if closed || width == 0 || height == 0 {
             log::info!("draw_one({idx}) SKIPPED: closed={closed} size={width}x{height}");
@@ -439,16 +729,30 @@ impl App {
         let rotate_rad = (self.cfg.rotate + self.cfg.auto_rotate * elapsed).to_radians();
         let amp_avg = self.bands.iter().copied().sum::<f32>() / NBANDS as f32;
         let particles = compute_particles(&self.cfg, elapsed, width, height, amp_avg);
-        if self.start.elapsed().as_secs_f32() < 1.0 {
-            log::info!("cfg.particles len={} mode={:?}", self.cfg.particles.len(), self.cfg.particle_mode);
-        }
-        if particles[2] > 0.0 && self.start.elapsed().as_secs_f32() < 2.0 {
-            log::info!("particle[0] = pos({}, {}) size {} alpha {} color({},{},{},{}) mode={:?}",
-                particles[0], particles[1], particles[2], particles[3],
-                particles[4], particles[5], particles[6], particles[7],
-                self.cfg.particle_mode);
-        }
 
+        // Widgets need &mut self; do it before borrowing the renderer.
+        let mut widgets = self.prepare_widgets(width, height);
+        let renderer = &mut self.outputs[idx].renderer;
+        // Flush pending texture uploads (image/clock) and write their atlas UV rects.
+        // uv_slots[slot] = (uvx, uvy, uvw, uvh) from upload_texture.
+        for (ti, img) in self.pending_textures.drain(..) {
+            log::info!("uploading texture {}: {}x{}", ti, img.w, img.h);
+            if let Some((ux, uy, uw, uh)) = renderer.upload_texture(ti, &img.rgba, img.w, img.h) {
+                log::info!("texture {} uv=({:.3},{:.3},{:.3},{:.3})", ti, ux, uy, uw, uh);
+                // find the widget slot that referenced this texture index
+                for s in 0..32 {
+                    let wo = s * 40;
+                    if (widgets[wo + 6] - ti as f32).abs() < 0.01 {
+                        widgets[wo + 7] = ux;
+                        widgets[wo + 8] = uy;
+                        widgets[wo + 9] = uw;
+                        widgets[wo + 10] = uh;
+                        self.widget_uvs[s] = (ux, uy, uw, uh);
+                    }
+                }
+            }
+        }
+        renderer.set_widgets(&widgets);
         renderer.resize(width, height);
         renderer.set_auto_rotate(rotate_rad);
         renderer.render(&self.bands, spawn_scale, &particles, elapsed);
@@ -460,5 +764,25 @@ impl App {
         surface.damage_buffer(0, 0, width as i32, height as i32);
         surface.frame(qh, FrameCallbackData(surface.clone()));
         layer.commit();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use crate::config::{Config, parse_for_test};
+
+    #[test]
+    fn parse_widgets_works() {
+        let qml = r##"
+PulseRing {
+    widgets: [
+        Widget { type: "clock"; x: 0.5; y: 0.22; fontSize: 56; color: "#EADDFF"; alpha: 0.9 }
+    ]
+}
+"##;
+        let cfg = parse_for_test(qml);
+        println!("widgets.len = {}", cfg.widgets.len());
+        for w in &cfg.widgets {
+            println!("widget: {:?} x={} y={} size={} alpha={}", w.widget_type, w.x, w.y, w.size, w.alpha);
+        }
     }
 }

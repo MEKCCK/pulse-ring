@@ -24,6 +24,12 @@ pub struct RingRenderer {
     fail_count: u64,
     id: u32,
     auto_rotate: f32,
+    widget_data: [f32; 1280],
+    widget_count: u32,
+    atlas_texture: Option<wgpu::Texture>,
+    atlas_view: Option<wgpu::TextureView>,
+    sampler: wgpu::Sampler,
+    bind_group_layout: wgpu::BindGroupLayout,
 }
 
 /// Shader uniforms. Matches `struct Uniforms` in ring.wgsl.
@@ -80,6 +86,9 @@ struct Uniforms {
     saturn_stripes: f32,  // 724
     // 32 particles x 12 f32 (x, y, size, alpha, r, g, b, a, spin, vx, vy, pad) — 720..
     particles: [f32; 1152],
+    // ---- widgets ----
+    widget_count: u32,
+    widgets: [f32; 1280],
 }
 
 impl RingRenderer {
@@ -131,32 +140,82 @@ impl RingRenderer {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ring uniforms"),
-            size: 5392,
+            size: 10496,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ring bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU32::new(5392).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU32::new(10496).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("widget sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        // 1x1 placeholder texture for the initial bind group.
+        let placeholder = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("placeholder"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let placeholder_view = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ring bg"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&placeholder_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -210,6 +269,12 @@ impl RingRenderer {
             fail_count: 0,
             id,
             auto_rotate: 0.0,
+            widget_data: [0.0; 1280],
+            widget_count: 0,
+            atlas_texture: None,
+            atlas_view: None,
+            sampler: sampler.clone(),
+            bind_group_layout: bind_group_layout.clone(),
         }
     }
 
@@ -221,6 +286,84 @@ impl RingRenderer {
     /// Current auto-rotation angle in radians (config rotate + autoRotate*time).
     pub fn set_auto_rotate(&mut self, rad: f32) {
         self.auto_rotate = rad;
+    }
+
+    /// Upload widget layout (computed CPU-side, pixels) into the uniform array.
+    pub fn set_widgets(&mut self, data: &[f32]) {
+        self.widget_data.fill(0.0);
+        let n = data.len().min(self.widget_data.len());
+        self.widget_data[..n].copy_from_slice(&data[..n]);
+        self.widget_count = (n / 40) as u32;
+    }
+
+    fn refresh_texture_bindings(&mut self) {
+        if let Some(view) = &self.atlas_view {
+            self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ring bg"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+        }
+    }
+
+    /// Upload an RGBA image into atlas slot `index` (each slot is 256x256 in a 8x8 grid).
+    /// Returns the actual content UV rect (x, y, w, h) in atlas coordinates, or None.
+    pub fn upload_texture(&mut self, index: usize, rgba: &[u8], w: u32, h: u32) -> Option<(f32, f32, f32, f32)> {
+        const SLOT: u32 = 256;
+        const GRID: u32 = 8;
+        if index >= 64 || w == 0 || h == 0 || w > SLOT || h > SLOT {
+            return None;
+        }
+        let atlas_w = SLOT * GRID;
+        let atlas_h = SLOT * GRID;
+        if self.atlas_texture.is_none() {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("widget atlas"),
+                size: wgpu::Extent3d { width: atlas_w, height: atlas_h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.atlas_texture = Some(tex);
+            self.atlas_view = Some(view);
+            self.refresh_texture_bindings();
+        }
+        let tex = self.atlas_texture.as_ref().unwrap();
+        let col = (index as u32 % GRID) * SLOT;
+        let row = (index as u32 / GRID) * SLOT;
+        let dst = wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x: col, y: row, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        };
+        let layout = wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) };
+        self.queue.write_texture(dst, rgba, layout, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+        let aw = atlas_w as f32;
+        let ah = atlas_h as f32;
+        let col = (index as u32 % GRID) as f32;
+        let row = (index as u32 / GRID) as f32;
+        Some((
+            col * SLOT as f32 / aw,
+            row * SLOT as f32 / ah,
+            w as f32 / aw,
+            h as f32 / ah,
+        ))
+    }
+
+    /// Atlas UV rect (x, y, w, h) for a slot, in 0..1.
+    pub fn atlas_uv(index: usize) -> (f32, f32, f32, f32) {
+        const SLOT: f32 = 512.0;
+        let x = index as f32 * SLOT;
+        (x / (SLOT * 4.0), 0.0, 1.0 / 4.0, 1.0)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -379,6 +522,8 @@ impl RingRenderer {
             saturn_alpha: c.saturn_alpha.clamp(0.0, 1.0),
             saturn_stripes: c.saturn_stripes.clamp(0.0, 1.0),
             particles: *particles,
+            widget_count: self.widget_count,
+            widgets: self.widget_data,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -482,7 +627,12 @@ const SHADER_SRC: &str = stringify!(
         saturn_alpha: f32,
         saturn_stripes: f32,
         particles: array<f32, 1152>,
+        widget_count: u32,
+        widgets: array<f32, 1280>,
     };
+
+    @group(0) @binding(1) var widget_texture: texture_2d<f32>;
+    @group(0) @binding(2) var widget_sampler: sampler;
 
     @group(0) @binding(0) var<storage, read> u: Uniforms;
 
@@ -638,6 +788,42 @@ const SHADER_SRC: &str = stringify!(
         return shape_ring_a(dist, ang, u.bass, base, u.inner_growth, u.inner_half_thick) * u.inner_alpha;
     }
 
+    // Average magnitude of bands [lo, hi) (lo/hi are u32 band indices).
+    fn band_energy(lo: u32, hi: u32) -> f32 {
+        var acc = 0.0;
+        for (var i = lo; i < hi; i = i + 1u) {
+            acc = acc + u.bands[i];
+        }
+        return acc / f32(max(hi - lo, 1u));
+    }
+
+    // Polar boundary radius for a ring widget's own shape (widget data offset `wo`).
+    fn widget_shape_r(ang: f32, wshape: f32, wcorners: f32, wspike: f32) -> f32 {
+        let sa = sin(ang);
+        let ca = cos(ang);
+        var n = 2.0;
+        var petal = 0.0;
+        if (wshape == 1.0) { n = 8.0; }
+        else if (wshape == 2.0) { n = 1.0; }
+        else if (wshape == 3.0) { n = 6.0; }
+        else if (wshape == 4.0) { n = 3.0; }
+        else if (wshape == 5.0) { n = 2.0; petal = wspike * 0.9; }
+        else if (wshape == 6.0) { n = 2.0; petal = wspike; }
+        let p = pow(abs(sa), n) + pow(abs(ca), n);
+        let super_e = 1.0 / pow(p, 1.0 / n);
+        var r = super_e;
+        if (petal > 0.0) {
+            r = r * (1.0 + petal * cos(wcorners * ang));
+        }
+        return r;
+    }
+
+    // Palette colour for a ring widget: 4 RGBA in widget data offset wo (colors at wo+23).
+    fn widget_pal(wo: u32, i: u32) -> vec4<f32> {
+        let o = wo + 23u + i * 4u;
+        return vec4<f32>(u.widgets[o], u.widgets[o + 1u], u.widgets[o + 2u], u.widgets[o + 3u]);
+    }
+
     @fragment
     fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let min_d = min(u.resolution.x, u.resolution.y);
@@ -678,13 +864,15 @@ const SHADER_SRC: &str = stringify!(
             let c = pal_col(0u);
             rgb = c.rgb * c.a;
         } else if (u.color_mode == 2u) {
-            // Gradient across the ring: 4-colour linear interpolation.
-            let t = ang / 6.28318530718;
-            let seg = u32(t * 3.0);
-            let ft = fract(t * 3.0);
+            // Gradient around the ring: smoothstep per segment so joints have zero slope
+            // (no hard seams), and wrap around so the first/last colours blend seamlessly.
+            let t = fract(ang / 6.28318530718);
+            let seg = u32(t * 4.0) % 4u;
+            let ft = fract(t * 4.0);
+            let sf = ft * ft * (3.0 - 2.0 * ft);
             let c0 = pal_col(seg);
-            let c1 = pal_col(min(seg + 1u, 3u));
-            let col = mix(c0, c1, ft);
+            let c1 = pal_col((seg + 1u) % 4u);
+            let col = mix(c0, c1, sf);
             rgb = col.rgb * col.a;
         } else {
             // Hue-rotating HSL.
@@ -757,11 +945,165 @@ const SHADER_SRC: &str = stringify!(
             }
         }
 
-        // Composite: rings + saturn band + particles over transparent background (premultiplied).
+        // ---- widgets: rings / images / clocks at custom positions ----
+        var w_col = vec3<f32>(0.0);
+        var w_a = 0.0;
+        for (var wi = 0u; wi < u.widget_count; wi = wi + 1u) {
+            let wo = wi * 40u;
+            let wtype = u.widgets[wo];
+            let wx = u.widgets[wo + 1u];
+            let wy = u.widgets[wo + 2u];
+            let wsize = u.widgets[wo + 3u];
+            let walpha = u.widgets[wo + 4u];
+            let wrot = u.widgets[wo + 5u];
+            let wtex = u.widgets[wo + 6u];
+            if (walpha <= 0.004) {
+                continue;
+            }
+            let wpos = vec2<f32>(wx, wy) * u.resolution;
+            let wd = in.pos.xy - wpos;
+            let wdist = length(wd);
+            if (wtype == 0.0) {
+                // Ring widget: fully independent style from its own uniform fields.
+                let wshape = u.widgets[wo + 12u];
+                let wcorners = u.widgets[wo + 13u];
+                let wspike = u.widgets[wo + 14u];
+                let wcmode = u.widgets[wo + 15u];
+                let wdashc = u.widgets[wo + 16u];
+                let wdashr = u.widgets[wo + 17u];
+                let wwidth = u.widgets[wo + 18u];
+                let wbase = u.widgets[wo + 19u] * min_d * wsize;
+                let wgrowth = u.widgets[wo + 20u] * min_d * wsize;
+                let whalo_s = u.widgets[wo + 21u];
+                let whalo = u.widgets[wo + 22u] * min_d * wsize;
+                let wband = u.widgets[wo + 39u];
+                var wang = atan2(wd.y, wd.x) + wrot;
+                if (wang < 0.0) { wang = wang + 6.28318530718; }
+                // Frequency response per bandMode:
+                //   0=full (angle-mapped), 1=bass, 2=mid, 3=treble, 4=energy
+                var wamp = band_amp(wang);
+                if (wband == 1.0) { wamp = band_energy(0u, 32u); }
+                else if (wband == 2.0) { wamp = band_energy(32u, 96u); }
+                else if (wband == 3.0) { wamp = band_energy(96u, 128u); }
+                else if (wband == 4.0) { wamp = band_energy(0u, 128u); }
+                // shape radius with widget's own shape params
+                let wr = widget_shape_r(wang, wshape, wcorners, wspike);
+                let wedge = wbase * wr + wamp * wgrowth;
+                let wthick = max(min_d * 0.006, 1.6) * max(wwidth / 6.0, 0.1) * wsize;
+                var wring = smoothstep(-u.aa, u.aa, wthick - abs(wdist - wedge));
+                if (wdashc > 0.0) {
+                    let seg = fract(wang / 6.28318530718 * wdashc);
+                    if (seg > wdashr) {
+                        wring = wring * (1.0 - smoothstep(wdashr, wdashr + 0.02, seg));
+                    }
+                }
+                // halo
+                var whalo_a = 0.0;
+                if (wdist > wedge) {
+                    let h_t = max(0.0, wedge + whalo - wdist) / max(whalo, 0.001);
+                    whalo_a = min(1.0, h_t * wamp) * whalo_s;
+                }
+                let wa_ring = max(wring, whalo_a);
+                if (wa_ring > 0.004) {
+                    var wrgb = vec3<f32>(0.6, 0.5, 0.9);
+                    if (wcmode == 1.0) {
+                        let c = widget_pal(wo, 0u);
+                        wrgb = c.rgb * c.a;
+                    } else if (wcmode == 2.0) {
+                        let t = fract(wang / 6.28318530718);
+                        let seg = u32(t * 4.0) % 4u;
+                        let ft = fract(t * 4.0);
+                        let sf = ft * ft * (3.0 - 2.0 * ft);
+                        let c0 = widget_pal(wo, seg);
+                        let c1 = widget_pal(wo, (seg + 1u) % 4u);
+                        let col = mix(c0, c1, sf);
+                        wrgb = col.rgb * col.a;
+                    }
+                    w_col += wrgb * wa_ring * walpha;
+                    w_a += wa_ring * walpha;
+                }
+            } else if (wtype == 3.0) {
+                // Bars widget: vertical spectrum bars.
+                let bn = clamp(u32(u.widgets[wo + 18u]), 2u, 64u);
+                let bmax_h = u.widgets[wo + 19u] * min_d;
+                let bgap = u.widgets[wo + 20u];
+                let bmirror = u.widgets[wo + 21u];
+                let wband = u.widgets[wo + 39u];
+                let wcmode = u.widgets[wo + 15u];
+                let total_w = wsize * min_d;
+                // frequency window for this widget's bandMode
+                var f_lo = 0.0;
+                var f_hi = 128.0;
+                if (wband == 1.0) { f_hi = 32.0; }
+                else if (wband == 2.0) { f_lo = 32.0; f_hi = 96.0; }
+                else if (wband == 3.0) { f_lo = 96.0; }
+                let step = total_w / f32(bn);
+                let bar_w = step * (1.0 - bgap * 0.8);
+                let x0 = wpos.x - total_w * 0.5;
+                for (var bi = 0u; bi < bn; bi = bi + 1u) {
+                    let bx = x0 + f32(bi) * step;
+                    if (abs(wd.x - (bx - wpos.x)) > bar_w * 0.5) {
+                        continue;
+                    }
+                    // band energy for this bar
+                    let span = f_hi - f_lo;
+                    let b0 = u32(f_lo + span * (f32(bi) / f32(bn)));
+                    let b1 = u32(f_lo + span * (f32(bi + 1u) / f32(bn)));
+                    let e = band_energy(b0, b1);
+                    let bh = e * bmax_h;
+                    var in_bar = false;
+                    if (bmirror > 0.5) {
+                        in_bar = abs(wd.y) < bh * 0.5;
+                    } else {
+                        in_bar = wd.y > -bh && wd.y < 0.0;
+                    }
+                    if (in_bar) {
+                        // colour: gradient across bars by index
+                        var brgb = vec3<f32>(0.4, 0.8, 1.0);
+                        if (wcmode == 1.0) {
+                            let c = widget_pal(wo, 0u);
+                            brgb = c.rgb * c.a;
+                        } else if (wcmode == 2.0) {
+                            let t = f32(bi) / f32(bn);
+                            let seg = u32(t * 4.0) % 4u;
+                            let ft = fract(t * 4.0);
+                            let sf = ft * ft * (3.0 - 2.0 * ft);
+                            let c0 = widget_pal(wo, seg);
+                            let c1 = widget_pal(wo, (seg + 1u) % 4u);
+                            let col = mix(c0, c1, sf);
+                            brgb = col.rgb * col.a;
+                        }
+                        w_col += brgb * walpha;
+                        w_a += walpha;
+                    }
+                }
+            } else {
+                // Image / clock widget: sample the atlas with the slot's UV rect.
+                let uv_x = u.widgets[wo + 7u];
+                let uv_y = u.widgets[wo + 8u];
+                let uv_w = u.widgets[wo + 9u];
+                let uv_h = u.widgets[wo + 10u];
+                let aspect = u.widgets[wo + 11u];
+                let half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
+                if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
+                    let uv = vec2<f32>(
+                        uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,
+                        uv_y + (wd.y / (half.y * 2.0) + 0.5) * uv_h,
+                    );
+                    let tc = textureSample(widget_texture, widget_sampler, uv);
+                    w_col += tc.rgb * tc.a * walpha;
+                    w_a += tc.a * walpha;
+                }
+            }
+        }
+        let wa = min(w_a, 1.0);
+
+        // Composite: rings + saturn band + particles + widgets over transparent background (premultiplied).
         let pa = min(p_a, 1.0);
         let sat_col = vec3<f32>(0.75, 0.85, 1.0);
-        let col = mix(rgb * a, sat_col, sat_a / max(a + sat_a, 0.0001)) * (a + sat_a) + p_col * (1.0 - min(a + sat_a, 1.0));
-        let alpha = a + sat_a + pa * (1.0 - min(a + sat_a, 1.0));
+        let ring_alpha = min(a + sat_a + wa, 1.0);
+        let col = mix(rgb * a, sat_col, sat_a / max(a + sat_a, 0.0001)) * (a + sat_a) + p_col * (1.0 - ring_alpha) + w_col;
+        let alpha = a + sat_a + pa * (1.0 - min(a + sat_a, 1.0)) + wa * (1.0 - min(a + sat_a, 1.0));
         if (alpha <= 0.004) {
             return vec4<f32>(0.0, 0.0, 0.0, 0.0);
         }
