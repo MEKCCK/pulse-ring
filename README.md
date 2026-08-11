@@ -1,25 +1,49 @@
 # pulse-ring
 
-Wayland 壁纸层上的音乐律动圆环（GPU 渲染，wgpu/Vulkan）。
+Wayland 壁纸层上的音乐律动可视化（GPU 渲染，wgpu/Vulkan）。
+
+## 架构：QML 样式 + Lua 行为
+
+```
+┌─────────────────────────────────────────────┐
+│  Lua 脚本层（怎么工作）                       │
+│  粒子/音频幅度/运动/条件逻辑/动态调参          │
+└──────────────┬──────────────────────────────┘
+               │ 每帧调用
+┌──────────────▼──────────────────────────────┐
+│  Rust 内核                                  │
+│  ├─ 音频：PipeWire monitor → FFT → 128 频段  │
+│  ├─ 配置：QML 解析 → Config                 │
+│  ├─ 渲染：wgpu (Vulkan) → wl-layer-shell    │
+│  └─ Widgets：时钟/封面/频谱/圆环/粒子        │
+└─────────────────────────────────────────────┘
+```
+
+- **QML（`pulse-ring.qml`）**：只负责静态样式——形状、颜色、大小、位置、widget 布局
+- **Lua（`pulse-ring.lua`）**：负责所有动态行为——粒子（轨道/速度）、音频条幅度、主环运动、衰减/平滑、自转、空闲呼吸、夜间模式、频段变换
 
 ## 特性
 
-- **多重圆环**：外环（按频段律动）、中环（跟随整体能量）、内环（跟随低频 bass）
-- **形状系统**：ring / square / diamond / hexagon / triangle / star / flower，支持旋转、虚线
-- **星环效果**：连续半透明环带 + 密集粒子环绕
-- **粒子系统**：burst / orbit / ring 三种模式，支持重力、阻力、淡入、闪烁、波动、自旋、拖尾
-- **启动展开特效**：expand 动画，多种缓动（outCubic / outBack / elastic / bounce）
-- **QML 配置**：`~/.config/pulse-ring/pulse-ring.qml` 声明式自定义全部效果
-- **多显示器**：每台显示器独立渲染
-- **音频**：通过 PipeWire 监听默认输出的 monitor，实时 FFT 分析
+- **多重圆环**：外环（频段律动）/ 中环（整体能量）/ 内环（低频 bass）
+- **形状系统**：ring / square / diamond / hexagon / triangle / star / flower，旋转、虚线
+- **星环效果**：连续半透明环带 + 粒子环绕
+- **Widgets**：模拟时钟、数字时钟、专辑封面（MPRIS 实时）、条形频谱（含镜像）、独立圆环，自由放置
+- **魔法阵启动动画**：三层环波浪展开 + 旋转 + 前沿光环
+- **Lua 插件**：`onUpdate` / `transformBands` / `pulse.*` API，动态控制一切
+- **多显示器**：每台独立渲染
+- **音频**：PipeWire monitor 实时 FFT
 
-## 构建
+## 安装（Arch Linux）
 
 ```bash
+# 从 AUR 或手动：
+git clone https://github.com/MEKCCK/pulse-ring
+cd pulse-ring
 cargo build --release
+sudo cp target/release/pulse-ring /usr/local/bin/
 ```
 
-需要 Rust 1.86+，运行环境为 Wayland（niri / sway / Hyprland 等支持 wlr-layer-shell 的合成器）。
+依赖：rust、pipewire、fontconfig（JetBrains Maple Mono 或任意 CJK 字体）
 
 ## 运行
 
@@ -27,30 +51,31 @@ cargo build --release
 pulse-ring
 ```
 
-配置在 `~/.config/pulse-ring/pulse-ring.qml`（首次运行自动读取，缺失时用默认值）。
+首次运行自动生成 `~/.config/pulse-ring/pulse-ring.qml` + `pulse-ring.lua`（内置默认配置）。
 
-## 配置示例
+## 配置
 
 ```qml
+// ~/.config/pulse-ring/pulse-ring.qml —— 静态样式
 PulseRing {
-    shape: "flower"          // ring|square|diamond|hexagon|triangle|star|flower
-    autoRotate: 5.0          // 自动旋转（度/秒）
-    colorMode: "hue"         // "hue" | "solid" | "gradient"
-
-    midRing: true            // 中环
-    midColor: "#ffc95e"
-    innerRing: true          // 内环
-    innerColor: "#00e6e0"
-
-    saturnBand: 0.035        // 星环带宽度（短边比例，0=关闭）
-    particleMode: "ring"     // "burst" | "orbit" | "ring" | "none"
-    particles: [
-        Particle { x: 0.010; angle: 0; speed: 26; size: 0.008; color: "#4da6ff"; life: 60 }
+    shape: "ring"
+    colorMode: "gradient"
+    colors: ["#6750A4", "#7D5260", "#D0BCFF", "#EADDFF"]
+    widgets: [
+        Widget { type: "analog"; x: 0.5; y: 0.5; size: 0.13 },
+        Widget { type: "cover";  x: 0.82; y: 0.16; size: 0.14 },
+        Widget { type: "bars";   x: 0.5;  y: 0.9;  size: 0.55; bars: 36 }
     ]
-
-    spawnEffect: "expand"    // 启动展开
-    spawnEase: "outBack"
 }
+```
+
+```lua
+-- ~/.config/pulse-ring/pulse-ring.lua —— 动态行为
+function onUpdate(dt)
+    config.growth = 0.14 + ring_amp * 0.12
+    pulse.setWidget(2, "barHeight", 0.04 + energy * 0.16)
+end
+function transformBands(bands) ... end
 ```
 
 ## 退出
