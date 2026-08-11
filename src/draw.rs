@@ -1055,7 +1055,9 @@ const SHADER_SRC: &str = stringify!(
                 let bar_w = step * (1.0 - bgap * 0.8);
                 let x0 = wpos.x - total_w * 0.5;
                 for (var bi = 0u; bi < bn; bi = bi + 1u) {
-                    let bx = x0 + f32(bi) * step;
+                    // bar centre starts half a bar in so the gaps are symmetric (visual centre
+                    // stays at wpos.x).
+                    let bx = x0 + bar_w * 0.5 + f32(bi) * step;
                     // band energy for this bar
                     let span = f_hi - f_lo;
                     let b0 = u32(f_lo + span * (f32(bi) / f32(bn)));
@@ -1207,13 +1209,18 @@ const SHADER_SRC: &str = stringify!(
                     }
                 }
             } else {
-                // Image / clock widget: sample the atlas with the slot's UV rect.
+                // Image / clock / text widget.
                 let uv_x = u.widgets[wo + 7u];
                 let uv_y = u.widgets[wo + 8u];
                 let uv_w = u.widgets[wo + 9u];
                 let uv_h = u.widgets[wo + 10u];
                 let aspect = u.widgets[wo + 11u];
-                let half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
+                let is_text = u.widgets[wo + 39u] == 99.0;
+                var half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
+                if (is_text) {
+                    // Text: display at texture pixel size (sharp), `size` is a multiplier.
+                    half = vec2<f32>(uv_w, uv_h) * 1024.0 * 0.5 * wsize;
+                }
                 if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
                     let uv = vec2<f32>(
                         uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,

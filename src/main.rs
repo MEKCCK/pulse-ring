@@ -140,7 +140,7 @@ fn main() {
         image_cache: Vec::new(),
         font: std::sync::Arc::new(load_font()),
         clock_cache: std::array::from_fn(|_| (String::new(), 0, 0, 0)),
-        texture_slots: vec![None; 8],
+        texture_slots: vec![None; 16],
         widget_uvs: [(0.0, 0.0, 0.0, 0.0); 32],
         cover_rx: spawn_cover_thread(),
         last_cover_path: String::new(),
@@ -538,15 +538,27 @@ struct ImageData {
 
 /// Load a system font for clock rendering (Noto Sans, fallback DejaVu).
 fn load_font() -> rusttype::Font<'static> {
+    // JetBrains Maple Mono (contains Chinese + Latin glyphs).
     let candidates = [
+        "/usr/share/fonts/TTF/JetBrains-Maple-Mono-NF-XX-XX/JetBrainsMapleMono-Regular.ttf",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/noto/NotoSans-SemiBold.ttf",
     ];
     for p in candidates {
         if let Ok(data) = std::fs::read(p) {
-            if let Some(f) = rusttype::Font::try_from_vec(data) {
-                return f;
+            if p.ends_with(".ttc") {
+                for idx in 0..8 {
+                    if let Some(f) = rusttype::Font::try_from_vec_and_index(data.clone(), idx) {
+                        if f.glyph('中').id().0 > 0 {
+                            return f;
+                        }
+                    }
+                }
+            } else if let Some(f) = rusttype::Font::try_from_vec(data) {
+                if f.glyph('中').id().0 > 0 {
+                    return f;
+                }
             }
         }
     }
@@ -608,7 +620,9 @@ fn fit_slot(img: ImageData) -> ImageData {
 }
 
 /// Rasterise a text string (may contain '\n' lines) to RGBA at the given font size.
-fn rasterize_text(font: &rusttype::Font, text: &str, size_px: f32, color: [f32; 4]) -> ImageData {
+fn rasterize_text(font: &rusttype::Font, text: &str, size_pt: f32, color: [f32; 4]) -> ImageData {
+    // pt -> px at 96 DPI (13.5pt = 18px)
+    let size_px = size_pt * 96.0 / 72.0;
     let scale = rusttype::Scale { x: size_px, y: size_px };
     let v_metrics = font.v_metrics(scale);
     let line_h = (v_metrics.ascent - v_metrics.descent).ceil() as u32;
@@ -654,7 +668,9 @@ impl App {
     fn prepare_widgets(&mut self, width: u32, height: u32) -> [f32; 1280] {
         use crate::config::WidgetType;
         let mut data = [0.0f32; 1280];
-        let mut tex_index = 0u32;
+        // Slots 0..7 reserved for text widgets (keyed by widget slot index).
+        // Images/covers allocate from 8 onward.
+        let mut tex_index = 8u32;
         // Reserve slot 3 for the album cover (clocks/images use 0..2).
         self.cover_tex_index = 3;
         let widgets: Vec<crate::config::WidgetConfig> = self.cfg.widgets.iter().take(32).cloned().collect();
@@ -790,27 +806,48 @@ impl App {
                     }
                 }
                 WidgetType::Clock => {
-                    let txt = chrono_now();
+                    let txt = match &w.text {
+                        Some(t) => t
+                            .replace("{title}", &self.music.title)
+                            .replace("{artist}", &self.music.artist)
+                            .replace("{album}", &self.music.album),
+                        None => chrono_now(),
+                    };
                     let (cached_text, cw, ch, cached_tex) = &self.clock_cache[slot];
                     let (cw, ch) = (*cw, *ch);
+                    // Text widgets get a dedicated atlas slot (widget slot == tex index) so the
+                    // UV rect always matches its texture. Plain clocks share the global pool.
                     let mut ti = *cached_tex;
-                    if &txt != cached_text || cw == 0 {
+                    if w.text.is_some() {
+                        data[o + 39] = 99.0; // text marker
+                        ti = slot as u32;
+                        if &txt != cached_text || cw == 0 {
+                            let img = fit_slot(rasterize_text(&self.font, &txt, w.font_size, w.color));
+                            let (iw, ih) = (img.w, img.h);
+                            self.texture_slots[ti as usize] = Some(img);
+                            self.clock_cache[slot] = (txt.clone(), iw, ih, ti);
+                            data[o + 11] = ih as f32 / iw as f32;
+                        } else {
+                            data[o + 11] = ch as f32 / cw as f32;
+                        }
+                        if tex_index <= ti {
+                            tex_index = ti + 1;
+                        }
+                    } else if &txt != cached_text || cw == 0 {
                         // 3x supersampling: sharper text when downscaled on screen.
-                        let img = rasterize_text(&self.font, &txt, w.font_size * 3.0, w.color);
+                        let img = fit_slot(rasterize_text(&self.font, &txt, w.font_size * 3.0, w.color));
                         let (iw, ih) = (img.w, img.h);
                         ti = tex_index;
                         self.texture_slots[ti as usize] = Some(img);
                         self.clock_cache[slot] = (txt.clone(), iw, ih, ti);
-                        let (cw, ch) = (iw, ih);
-                        data[o + 11] = ch as f32 / cw as f32;
+                        data[o + 11] = ih as f32 / iw as f32;
+                        if ti >= tex_index {
+                            tex_index = ti + 1;
+                        }
                     } else {
-                        ti = *cached_tex;
                         data[o + 11] = ch as f32 / cw as f32;
                     }
                     data[o + 6] = ti as f32;
-                    if ti >= tex_index {
-                        tex_index = ti + 1;
-                    }
                 }
             }
         }
@@ -920,6 +957,7 @@ impl App {
         // each renderer owns its own atlas, so no shared queue that one monitor drains.
         for (ti, img) in self.texture_slots.iter().enumerate() {
             if let Some(img) = img {
+                log::info!("upload tex {}: {}x{}", ti, img.w, img.h);
                 if let Some((ux, uy, uw, uh)) = renderer.upload_texture(ti, &img.rgba, img.w, img.h) {
                     // find the widget slot(s) referencing this texture index
                     for s in 0..32 {

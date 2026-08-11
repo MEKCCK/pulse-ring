@@ -42,6 +42,8 @@ pub struct WidgetConfig {
     pub color: [f32; 4],
     /// Font size in pixels (clock widgets).
     pub font_size: f32,
+    /// Custom text for clock widgets (supports {title}/{artist}/{album} placeholders).
+    pub text: Option<String>,
     // ---- ring widget style (independent per widget) ----
     pub shape: Shape,
     pub corners: f32,
@@ -89,6 +91,7 @@ impl Default for WidgetConfig {
             source: None,
             color: [1.0, 1.0, 1.0, 1.0],
             font_size: 48.0,
+            text: None,
             shape: Shape::Ring,
             corners: 5.0,
             spikiness: 0.35,
@@ -625,6 +628,11 @@ fn parse_widget(obj: &[(String, Val)]) -> Option<WidgetConfig> {
             "alpha" | "opacity" => w.alpha = num(v)?,
             "rotate" | "rotation" => w.rotate = num(v)?,
             "fontSize" => w.font_size = num(v)?,
+            "text" | "label" => {
+                if let Val::Str(s) = v {
+                    w.text = Some(s.clone());
+                }
+            },
             "source" | "src" => {
                 if let Val::Str(s) = v {
                     w.source = Some(s.clone());
