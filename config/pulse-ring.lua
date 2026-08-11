@@ -35,7 +35,7 @@ function onUpdate(dt)
 
     -- 主环运动：温和跟随
     local target_growth = 0.14 + ring_amp * 0.06
-    local target_sens = 1.0 + ring_amp * 0.3
+    local target_sens = 1.6 + ring_amp * 0.4
     prev_growth = prev_growth * 0.9 + target_growth * 0.1
     prev_sens = prev_sens * 0.9 + target_sens * 0.1
     config.growth = prev_growth

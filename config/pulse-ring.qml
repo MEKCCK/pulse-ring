@@ -17,6 +17,7 @@ PulseRing {
     ringWidth: 7
     baseRadius: 0.13
     growth: 0.20
+    outerUniform: true     // 外环整体伸缩（与中/内环一致），不做角度扭曲
     haloStrength: 0.18
     haloSize: 0.12
     alpha: 1.0
@@ -63,8 +64,8 @@ PulseRing {
         // 条形频谱（底部，低频）
         Widget {
             type: "bars"; x: 0.5; y: 0.9
-            size: 0.55; bars: 36; barHeight: 0.14; barGap: 0.18
-            bandMode: "bass"; colorMode: "gradient"
+            size: 0.55; bars: 64; barHeight: 0.14; barGap: 0.08
+            bandMode: "full"; colorMode: "gradient"
             colors: ["#4CAF50", "#FFD740", "#FF6E40", "#FF4081"]
         },
 
@@ -75,7 +76,9 @@ PulseRing {
             mirror: true; bandMode: "full"
             colorMode: "gradient"; colors: ["#00E5FF", "#69F0AE", "#7C4DFF", "#E040FB"]
         },
-    ]
+            // 插件测试（左下角）
+        Widget { type: "plugin"; plugin: "example-text"; x: 0.15; y: 0.8; size: 0.12; alpha: 1.0 }
+]
 
     // ================= 全局 =================
     idleBreathe: 0.05

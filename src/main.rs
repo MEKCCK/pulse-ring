@@ -989,7 +989,7 @@ impl App {
             for i in 0..128 {
                 let v = out[i];
                 let s = self.plugin_smooth_bands[i];
-                let sm = if v > s { s * 0.7 + v * 0.3 } else { s * 0.9 + v * 0.1 };
+                let sm = if v > s { s * 0.5 + v * 0.5 } else { s * 0.85 + v * 0.15 };
                 self.plugin_smooth_bands[i] = sm;
                 render_bands[i] = sm;
             }

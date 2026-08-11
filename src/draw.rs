@@ -74,6 +74,7 @@ struct Uniforms {
     spawn_effect: u32,    // 684
     spawn_t: f32,         // 688
     spawn_rot: f32,       // 692
+    outer_uniform: u32,
     particle_mode: u32,   // 684
     particle_loop: u32,   // 688
     // ---- appearance extras ----
@@ -143,7 +144,7 @@ impl RingRenderer {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ring uniforms"),
-            size: 10512,
+            size: 10528,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -157,7 +158,7 @@ impl RingRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU32::new(10512).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
+                        min_binding_size: NonZeroU32::new(10528).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
                     },
                     count: None,
                 },
@@ -508,6 +509,7 @@ impl RingRenderer {
             spawn_effect: spawn_effect,
             spawn_t: spawn_t,
             spawn_rot: spawn_rot,
+            outer_uniform: c.outer_uniform as u32,
             particle_mode: match c.particle_mode {
                 crate::config::ParticleMode::Burst => 1,
                 crate::config::ParticleMode::Orbit => 2,
@@ -627,6 +629,7 @@ const SHADER_SRC: &str = stringify!(
         spawn_effect: u32,
         spawn_t: f32,
         spawn_rot: f32,
+        outer_uniform: u32,
         particle_mode: u32,
         particle_loop: u32,
         dash_count: f32,
@@ -876,11 +879,15 @@ const SHADER_SRC: &str = stringify!(
         if (ang < 0.0) { ang = ang + 6.28318530718; }
         // Spatial anti-aliasing along the ring: average amp over neighbouring angles so the
         // outline deforms smoothly instead of jaggedly snapping between band values.
-        let amp = max(
+        var amp = max(
             (band_amp(ang) + band_amp(ang - 0.02) + band_amp(ang + 0.02)
              + band_amp(ang - 0.045) + band_amp(ang + 0.045)) * 0.2,
             idle_amp()
         );
+        // Uniform mode: the outer ring scales as a whole like the mid/inner rings.
+        if (u.outer_uniform == 1u) {
+            amp = max(overall_energy(), idle_amp());
+        }
 
         // ---- outer shape (music-reactive, angle-mapped), scaled by spawn anim ----
         // Magic effect: rings unfold in a wave and the glyph rotates while spawning.
