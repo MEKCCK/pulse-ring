@@ -287,6 +287,10 @@ pub struct Config {
     pub mid_color: [f32; 4],
     // ---- particles ----
     pub particle_shape: ParticleShape,
+    // ---- lua ----
+    /// Optional Lua script path; the script can transform bands, tweak config and widgets
+    /// at runtime via `onUpdate`, `transformBands`, etc.
+    pub lua_script: Option<String>,
     // ---- widgets ----
     /// Extra placed widgets (rings / images / clocks). The main ring is always widget[0].
     pub widgets: Vec<WidgetConfig>,
@@ -342,6 +346,7 @@ impl Default for Config {
             saturn_alpha: 0.30,
             saturn_stripes: 0.35,
             particle_shape: ParticleShape::Circle,
+            lua_script: None,
             widgets: vec![],
             spawn_effect: SpawnEffect::Expand,
             spawn_duration: 1400.0,
@@ -841,6 +846,11 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
                     cfg.colors = vec![c];
                     cfg.color_mode = ColorMode::Gradient;
                 }
+            }
+        }
+        "luaScript" | "lua" => {
+            if let Val::Str(s) = v {
+                cfg.lua_script = Some(s.clone());
             }
         }
         "widgets" => {

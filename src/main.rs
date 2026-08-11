@@ -24,6 +24,7 @@ use wayland_client::{
 mod audio;
 mod config;
 mod draw;
+mod lua;
 use audio::NBANDS;
 use draw::RingRenderer;
 
@@ -70,12 +71,16 @@ struct App {
     cover_aspect: f32,
     current_cover: Option<ImageData>,
     cover_slot: usize,
+    lua_state: lua::LuaState,
+    music: lua::MusicInfo,
+    ring_amp_smooth: f32,
+    last_music_poll: f32,
 }
 
 fn main() {
     env_logger::init();
 
-    let cfg = config::Config::load(&config::config_path());
+    let mut cfg = config::Config::load(&config::config_path());
     let audio_rx = audio::start_audio(cfg.sensitivity, cfg.decay);
 
     let conn = Connection::connect_to_env().expect("failed to connect to Wayland");
@@ -115,6 +120,8 @@ fn main() {
     // Drop the scratch surfaces; real ones are created in new_output().
     drop(scratch_wgpu);
 
+    let lua_script = cfg.lua_script.clone();
+    let lua_state = lua::LuaState::new(lua_script.as_deref(), &mut cfg);
     let mut app = App {
         compositor,
         layer_shell,
@@ -142,6 +149,10 @@ fn main() {
         cover_aspect: 1.0,
         current_cover: None,
         cover_slot: 0,
+        lua_state,
+        music: lua::MusicInfo::default(),
+        ring_amp_smooth: 0.0,
+        last_music_poll: -10.0,
     };
 
     loop {
@@ -390,6 +401,8 @@ fn compute_particles(
                 // particles always hug the ring without ever being swallowed by it.
                 let w = p.speed.to_radians();
                 let th = a0 + w * t;
+                // Orbit follows the ring's outer edge through the low-passed amplitude, so the
+                // band swells/settles smoothly and never twitches in and out.
                 let r = ((cfg.base_radius + cfg.growth * amp_avg + cfg.halo_size * 0.5 + p.x) * min_d)
                     .max(2.0);
                 let dir = vec2_angle(th);
@@ -437,6 +450,10 @@ fn vec2_angle(a: f32) -> (f32, f32) {
 
 /// Current time as "HH:MM" (system local time, no chrono dependency).
 /// Current local time parts: (hour, minute, second, sub-second fraction).
+pub fn main_now_hmsparts() -> (i32, i32, i32, f32) {
+    now_hmsparts()
+}
+
 fn now_hmsparts() -> (i32, i32, i32, f32) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -825,6 +842,30 @@ impl App {
         None
     }
 
+    /// Refresh MPRIS music info (throttled by the cover thread cadence: cheap anyway).
+    fn poll_music(&mut self) {
+        let out = std::process::Command::new("playerctl")
+            .args(["metadata", "xesam:title"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        if let Some(t) = out {
+            if self.music.title != t {
+                self.music.title = t;
+            }
+        }
+        let out = std::process::Command::new("playerctl")
+            .args(["metadata", "xesam:artist"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        if let Some(a) = out {
+            self.music.artist = a;
+        }
+    }
+
     fn pull_audio(&mut self) {
         while let Ok(b) = self.audio_rx.try_recv() {
             self.bands = b;
@@ -844,10 +885,20 @@ impl App {
         }
 
         let elapsed = self.start.elapsed().as_secs_f32();
+        if elapsed - self.last_music_poll > 2.0 {
+            self.last_music_poll = elapsed;
+            self.poll_music();
+        }
+        // Lua hooks: let the script transform bands and tweak config each frame.
+        self.bands = self.lua_state.transform_bands(&self.bands);
+        self.lua_state.frame(&mut self.cfg, &self.bands, elapsed, &self.music);
         let spawn_scale = spawn_scale_for(&self.cfg, elapsed);
         let rotate_rad = (self.cfg.rotate + self.cfg.auto_rotate * elapsed).to_radians();
         let amp_avg = self.bands.iter().copied().sum::<f32>() / NBANDS as f32;
-        let particles = compute_particles(&self.cfg, elapsed, width, height, amp_avg);
+        // Time-domain low-pass: the ring band follows the music smoothly, so the particle
+        // orbit swells and settles gently instead of twitching in/out.
+        self.ring_amp_smooth = self.ring_amp_smooth * 0.90 + amp_avg * 0.10;
+        let particles = compute_particles(&self.cfg, elapsed, width, height, self.ring_amp_smooth);
 
         // Widgets need &mut self; do it before borrowing the renderer.
         let mut widgets = self.prepare_widgets(width, height);

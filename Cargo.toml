@@ -23,6 +23,7 @@ png = "0.18"
 rusttype = "0.9"
 libc = "0.2.189"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+mlua = { version = "0.10", default-features = false, features = ["lua54", "vendored"] }
 
 [profile.release]
 opt-level = 3
