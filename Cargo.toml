@@ -22,6 +22,7 @@ wayland-protocols = { version = "0.32.13", features = ["staging"] }
 png = "0.18"
 rusttype = "0.9"
 libc = "0.2.189"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [profile.release]
 opt-level = 3

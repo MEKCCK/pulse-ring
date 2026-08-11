@@ -18,6 +18,10 @@ pub enum WidgetType {
     Clock,
     /// A vertical spectrum bar visualiser.
     Bars,
+    /// The current music album cover (MPRIS), with a border and beat-scaling.
+    Cover,
+    /// An analog (hand-dial) clock.
+    Analog,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +65,16 @@ pub struct WidgetConfig {
     pub bar_height: f32,
     pub bar_gap: f32,
     pub bar_mirror: bool,
+    // ---- cover widget ----
+    /// Border width (fraction of the shorter edge).
+    pub border_width: f32,
+    /// Beat-scaling amplitude (0 = static).
+    pub cover_growth: f32,
+    // ---- analog clock ----
+    /// Number of hour ticks (12 or 24).
+    pub tick_count: f32,
+    /// Dial border width (fraction of the shorter edge).
+    pub dial_border: f32,
 }
 
 impl Default for WidgetConfig {
@@ -94,6 +108,10 @@ impl Default for WidgetConfig {
             bar_height: 0.15,
             bar_gap: 0.25,
             bar_mirror: false,
+            border_width: 0.004,
+            cover_growth: 0.08,
+            tick_count: 12.0,
+            dial_border: 0.004,
         }
     }
 }
@@ -590,6 +608,8 @@ fn parse_widget(obj: &[(String, Val)]) -> Option<WidgetConfig> {
                             WidgetType::Clock
                         }
                         "bars" | "bar" | "spectrum" => WidgetType::Bars,
+                        "cover" | "album" | "art" => WidgetType::Cover,
+                        "analog" | "clock2" | "handclock" => WidgetType::Analog,
                         _ => WidgetType::Ring,
                     };
                 }
@@ -664,6 +684,10 @@ fn parse_widget(obj: &[(String, Val)]) -> Option<WidgetConfig> {
             "barHeight" => w.bar_height = num(v)?,
             "barGap" => w.bar_gap = num(v)?,
             "mirror" => w.bar_mirror = num(v)? > 0.0,
+            "borderWidth" => w.border_width = num(v)?,
+            "tickCount" => w.tick_count = num(v)?,
+            "dialBorder" => w.dial_border = num(v)?,
+            "coverGrowth" => w.cover_growth = num(v)?,
             "bandMode" => {
                 if let Val::Str(s) = v {
                     w.band_mode = match s.to_ascii_lowercase().as_str() {

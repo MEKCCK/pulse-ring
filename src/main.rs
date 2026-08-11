@@ -61,8 +61,15 @@ struct App {
     font: std::sync::Arc<rusttype::Font<'static>>,
     // Per-widget clock cache: (last_text, tex_w, tex_h, tex_index)
     clock_cache: [(String, u32, u32, u32); 8],
-    pending_textures: Vec<(usize, ImageData)>,
+    texture_slots: Vec<Option<ImageData>>,
     widget_uvs: [(f32, f32, f32, f32); 32],
+    cover_rx: std::sync::mpsc::Receiver<ImageData>,
+    last_cover_path: String,
+    cover_tex_index: usize,
+    cover_loaded: bool,
+    cover_aspect: f32,
+    current_cover: Option<ImageData>,
+    cover_slot: usize,
 }
 
 fn main() {
@@ -126,8 +133,15 @@ fn main() {
         image_cache: Vec::new(),
         font: std::sync::Arc::new(load_font()),
         clock_cache: std::array::from_fn(|_| (String::new(), 0, 0, 0)),
-        pending_textures: Vec::new(),
+        texture_slots: vec![None; 8],
         widget_uvs: [(0.0, 0.0, 0.0, 0.0); 32],
+        cover_rx: spawn_cover_thread(),
+        last_cover_path: String::new(),
+        cover_tex_index: 0,
+        cover_loaded: false,
+        cover_aspect: 1.0,
+        current_cover: None,
+        cover_slot: 0,
     };
 
     loop {
@@ -422,6 +436,63 @@ fn vec2_angle(a: f32) -> (f32, f32) {
 
 
 /// Current time as "HH:MM" (system local time, no chrono dependency).
+/// Current local time parts: (hour, minute, second, sub-second fraction).
+fn now_hmsparts() -> (i32, i32, i32, f32) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let t = secs;
+    unsafe {
+        libc::localtime_r(&t, &mut tm);
+    }
+    (tm.tm_hour, tm.tm_min, tm.tm_sec, now.subsec_nanos() as f32 / 1e9)
+}
+
+/// Poll the MPRIS cover via `playerctl` every 2s, decode it, send RGBA through a channel.
+fn spawn_cover_thread() -> std::sync::mpsc::Receiver<ImageData> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut last: Option<String> = None;
+        loop {
+            let art = std::process::Command::new("playerctl")
+                .args(["metadata", "mpris:artUrl"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(url) = art {
+                let path = url.strip_prefix("file://").map(str::to_string).unwrap_or_else(|| url.clone());
+                if last.as_deref() != Some(&path) {
+                    last = Some(path.clone());
+                    log::info!("cover: new art {path}");
+                    match load_image_path(&path) {
+                        Some(img) => { log::info!("cover: decoded {}x{}", img.w, img.h); let _ = tx.send(img); }
+                        None => log::warn!("cover: decode failed {path}"),
+                    }
+                }
+            } else {
+                log::warn!("cover: no artUrl");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+    rx
+}
+
+/// Decode a PNG or JPEG file into RGBA (scaled to fit 256 slot).
+fn load_image_path(path: &str) -> Option<ImageData> {
+    let expanded = path.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1);
+    let bytes = std::fs::read(&expanded).ok()?;
+    let img = image::load_from_memory(&bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let img = ImageData { w, h, rgba: rgba.into_raw() };
+    Some(fit_slot(img))
+}
+
 /// Current local time as two lines: "HH:MM\nMM-DD" (libc localtime_r, system timezone).
 fn chrono_now() -> String {
     let now = std::time::SystemTime::now()
@@ -499,7 +570,7 @@ fn load_png(path: &str) -> Option<ImageData> {
 
 /// Scale an image down (bilinear-ish) to fit a 256x256 atlas slot, keeping aspect.
 fn fit_slot(img: ImageData) -> ImageData {
-    const MAX: u32 = 256;
+    const MAX: u32 = 512;
     if img.w <= MAX && img.h <= MAX {
         return img;
     }
@@ -567,6 +638,8 @@ impl App {
         use crate::config::WidgetType;
         let mut data = [0.0f32; 1280];
         let mut tex_index = 0u32;
+        // Reserve slot 3 for the album cover (clocks/images use 0..2).
+        self.cover_tex_index = 3;
         let widgets: Vec<crate::config::WidgetConfig> = self.cfg.widgets.iter().take(32).cloned().collect();
         for (slot, w) in widgets.iter().enumerate() {
             let o = slot * 40;
@@ -575,6 +648,8 @@ impl App {
                 WidgetType::Image => 1.0,
                 WidgetType::Clock => 2.0,
                 WidgetType::Bars => 3.0,
+                WidgetType::Cover => 4.0,
+                WidgetType::Analog => 5.0,
             };
             data[o + 1] = w.x;
             data[o + 2] = w.y;
@@ -638,6 +713,43 @@ impl App {
                     data[o + 7] = 0.0;
                     data[o + 8] = 0.0;
                 }
+                WidgetType::Analog => {
+                    // 18=tickCount, 19=hour angle, 20=minute angle, 21=second angle,
+                    // 22=dial border, colors[0]=hand colour
+                    data[o + 18] = w.tick_count.clamp(2.0, 24.0);
+                    data[o + 22] = w.dial_border.max(0.0);
+                    for (ci, ch) in w.color.iter().enumerate() {
+                        data[o + 23 + ci] = *ch;
+                    }
+                    // hand angles (radians, 12 o'clock = -PI/2)
+                    let t = now_hmsparts();
+                    let sec = t.2 as f32 + t.3 as f32;
+                    let min = t.1 as f32 + sec / 60.0;
+                    let hour = (t.0 as f32 % 12.0) + min / 60.0;
+                    data[o + 19] = (hour / 12.0 * 6.28318530718 - 1.5707963268);
+                    data[o + 20] = (min / 60.0 * 6.28318530718 - 1.5707963268);
+                    data[o + 21] = (sec / 60.0 * 6.28318530718 - 1.5707963268);
+                }
+                WidgetType::Cover => {
+                    self.cover_slot = slot;
+                    // tex_index points at the cover texture slot (set when loaded).
+                    data[o + 6] = self.cover_tex_index as f32;
+                    // 18=border width, 19=cover growth
+                    data[o + 18] = w.border_width.max(0.0);
+                    data[o + 19] = w.cover_growth.max(0.0);
+                    data[o + 11] = self.cover_aspect;
+                    // border colour from widget.color -> colors[0]
+                    for (ci, ch) in w.color.iter().enumerate() {
+                        data[o + 23 + ci] = *ch;
+                    }
+                    // Pull the latest cover from the MPRIS thread.
+                    while let Ok(img) = self.cover_rx.try_recv() {
+                        self.cover_loaded = true;
+                        self.cover_aspect = img.h as f32 / img.w as f32;
+                        self.current_cover = Some(img);
+                        log::info!("cover: new cover stored ({}x{})", self.cover_aspect, 0);
+                    }
+                }
                 WidgetType::Bars => {
                     // Reuse style slots: 18=bars count, 19=max height, 20=gap, 21=mirror.
                     data[o + 18] = w.bar_count.clamp(2.0, 64.0);
@@ -656,7 +768,7 @@ impl App {
                         let (iw, ih) = (img.w as f32, img.h as f32);
                         data[o + 6] = tex_index as f32;
                         data[o + 11] = ih / iw; // aspect
-                        self.pending_textures.push((tex_index as usize, img));
+                        self.texture_slots[tex_index as usize] = Some(img);
                         tex_index += 1;
                     }
                 }
@@ -666,10 +778,11 @@ impl App {
                     let (cw, ch) = (*cw, *ch);
                     let mut ti = *cached_tex;
                     if &txt != cached_text || cw == 0 {
-                        let img = rasterize_text(&self.font, &txt, w.font_size, w.color);
+                        // 3x supersampling: sharper text when downscaled on screen.
+                        let img = rasterize_text(&self.font, &txt, w.font_size * 3.0, w.color);
                         let (iw, ih) = (img.w, img.h);
                         ti = tex_index;
-                        self.pending_textures.push((ti as usize, img));
+                        self.texture_slots[ti as usize] = Some(img);
                         self.clock_cache[slot] = (txt.clone(), iw, ih, ti);
                         let (cw, ch) = (iw, ih);
                         data[o + 11] = ch as f32 / cw as f32;
@@ -688,6 +801,12 @@ impl App {
         for (si, w) in widgets.iter().enumerate() {
             if w.widget_type == crate::config::WidgetType::Image {
                 log::info!("image widget slot={} data={:?}", si, &data[si * 40..si * 40 + 24]);
+            }
+            if w.widget_type == crate::config::WidgetType::Cover {
+                log::info!("cover widget slot={} data={:?}", si, &data[si * 40..si * 40 + 24]);
+            }
+            if w.widget_type == crate::config::WidgetType::Clock {
+                log::info!("clock widget slot={} data={:?}", si, &data[si * 40..si * 40 + 12]);
             }
         }
         data
@@ -733,21 +852,34 @@ impl App {
         // Widgets need &mut self; do it before borrowing the renderer.
         let mut widgets = self.prepare_widgets(width, height);
         let renderer = &mut self.outputs[idx].renderer;
-        // Flush pending texture uploads (image/clock) and write their atlas UV rects.
-        // uv_slots[slot] = (uvx, uvy, uvw, uvh) from upload_texture.
-        for (ti, img) in self.pending_textures.drain(..) {
-            log::info!("uploading texture {}: {}x{}", ti, img.w, img.h);
-            if let Some((ux, uy, uw, uh)) = renderer.upload_texture(ti, &img.rgba, img.w, img.h) {
-                log::info!("texture {} uv=({:.3},{:.3},{:.3},{:.3})", ti, ux, uy, uw, uh);
-                // find the widget slot that referenced this texture index
-                for s in 0..32 {
-                    let wo = s * 40;
-                    if (widgets[wo + 6] - ti as f32).abs() < 0.01 {
-                        widgets[wo + 7] = ux;
-                        widgets[wo + 8] = uy;
-                        widgets[wo + 9] = uw;
-                        widgets[wo + 10] = uh;
-                        self.widget_uvs[s] = (ux, uy, uw, uh);
+        // Cover texture: upload to every renderer independently (multi-monitor safe).
+        if let Some(img) = &self.current_cover {
+            if let Some((ux, uy, uw, uh)) = renderer.upload_texture(self.cover_tex_index, &img.rgba, img.w, img.h) {
+                log::info!("cover: uploaded slot={} uv=({:.3},{:.3},{:.3},{:.3})", self.cover_slot, ux, uy, uw, uh);
+                self.widget_uvs[self.cover_slot] = (ux, uy, uw, uh);
+                // also write into the local widgets array so this frame sees it
+                let wo = self.cover_slot * 40;
+                widgets[wo + 7] = ux;
+                widgets[wo + 8] = uy;
+                widgets[wo + 9] = uw;
+                widgets[wo + 10] = uh;
+            }
+        }
+        // Upload every texture slot to THIS renderer every frame (multi-monitor safe):
+        // each renderer owns its own atlas, so no shared queue that one monitor drains.
+        for (ti, img) in self.texture_slots.iter().enumerate() {
+            if let Some(img) = img {
+                if let Some((ux, uy, uw, uh)) = renderer.upload_texture(ti, &img.rgba, img.w, img.h) {
+                    // find the widget slot(s) referencing this texture index
+                    for s in 0..32 {
+                        let wo = s * 40;
+                        if (widgets[wo + 6] - ti as f32).abs() < 0.01 {
+                            widgets[wo + 7] = ux;
+                            widgets[wo + 8] = uy;
+                            widgets[wo + 9] = uw;
+                            widgets[wo + 10] = uh;
+                            self.widget_uvs[s] = (ux, uy, uw, uh);
+                        }
                     }
                 }
             }

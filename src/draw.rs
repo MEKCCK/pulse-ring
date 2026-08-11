@@ -313,8 +313,8 @@ impl RingRenderer {
     /// Upload an RGBA image into atlas slot `index` (each slot is 256x256 in a 8x8 grid).
     /// Returns the actual content UV rect (x, y, w, h) in atlas coordinates, or None.
     pub fn upload_texture(&mut self, index: usize, rgba: &[u8], w: u32, h: u32) -> Option<(f32, f32, f32, f32)> {
-        const SLOT: u32 = 256;
-        const GRID: u32 = 8;
+        const SLOT: u32 = 512;
+        const GRID: u32 = 4;
         if index >= 64 || w == 0 || h == 0 || w > SLOT || h > SLOT {
             return None;
         }
@@ -463,7 +463,7 @@ impl RingRenderer {
             half_thick: (min_d * 0.006).max(1.6) * (c.ring_width / 6.0).max(0.1),
             growth: min_d * c.growth,
             halo: min_d * c.halo_size,
-            aa: 1.4,
+            aa: 2.5,
             halo_strength: c.halo_strength,
             alpha: c.alpha,
             x_off: c.x_offset,
@@ -797,6 +797,14 @@ const SHADER_SRC: &str = stringify!(
         return acc / f32(max(hi - lo, 1u));
     }
 
+    // Distance from point p to segment [a, b].
+    fn segment_dist(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+        let ab = b - a;
+        let ap = p - a;
+        let t = clamp(dot(ap, ab) / max(dot(ab, ab), 0.000001), 0.0, 1.0);
+        return length(ap - ab * t);
+    }
+
     // Polar boundary radius for a ring widget's own shape (widget data offset `wo`).
     fn widget_shape_r(ang: f32, wshape: f32, wcorners: f32, wspike: f32) -> f32 {
         let sa = sin(ang);
@@ -833,7 +841,13 @@ const SHADER_SRC: &str = stringify!(
 
         var ang = atan2(d.y, d.x);
         if (ang < 0.0) { ang = ang + 6.28318530718; }
-        let amp = max(band_amp(ang), idle_amp());
+        // Spatial anti-aliasing along the ring: average amp over neighbouring angles so the
+        // outline deforms smoothly instead of jaggedly snapping between band values.
+        let amp = max(
+            (band_amp(ang) + band_amp(ang - 0.02) + band_amp(ang + 0.02)
+             + band_amp(ang - 0.045) + band_amp(ang + 0.045)) * 0.2,
+            idle_amp()
+        );
 
         // ---- outer shape (music-reactive, angle-mapped), scaled by spawn anim ----
         let base_scaled = u.base_r * u.spawn_scale;
@@ -1042,22 +1056,25 @@ const SHADER_SRC: &str = stringify!(
                 let x0 = wpos.x - total_w * 0.5;
                 for (var bi = 0u; bi < bn; bi = bi + 1u) {
                     let bx = x0 + f32(bi) * step;
-                    if (abs(wd.x - (bx - wpos.x)) > bar_w * 0.5) {
-                        continue;
-                    }
                     // band energy for this bar
                     let span = f_hi - f_lo;
                     let b0 = u32(f_lo + span * (f32(bi) / f32(bn)));
                     let b1 = u32(f_lo + span * (f32(bi + 1u) / f32(bn)));
                     let e = band_energy(b0, b1);
                     let bh = e * bmax_h;
-                    var in_bar = false;
+                    // bar rect SDF with anti-aliased edges:
+                    // ex = distance to left/right edges, ey = distance to bottom edge,
+                    // top edge at ey == bh (bar height). All outside => negative.
+                    let ex = bar_w * 0.5 - abs(wd.x - (bx - wpos.x));
+                    var ey = 0.0;
                     if (bmirror > 0.5) {
-                        in_bar = abs(wd.y) < bh * 0.5;
+                        ey = bh * 0.5 - abs(wd.y);
                     } else {
-                        in_bar = wd.y > -bh && wd.y < 0.0;
+                        ey = 0.0 - wd.y;
                     }
-                    if (in_bar) {
+                    // inside bar region: ex > 0 and 0 < ey < bh
+                    let bar_a = smoothstep(-1.2, 1.2, min(ex, ey)) * smoothstep(0.6, -0.6, ey - bh);
+                    if (bar_a > 0.004) {
                         // colour: gradient across bars by index
                         var brgb = vec3<f32>(0.4, 0.8, 1.0);
                         if (wcmode == 1.0) {
@@ -1073,8 +1090,120 @@ const SHADER_SRC: &str = stringify!(
                             let col = mix(c0, c1, sf);
                             brgb = col.rgb * col.a;
                         }
-                        w_col += brgb * walpha;
-                        w_a += walpha;
+                        w_col += brgb * walpha * bar_a;
+                        w_a += walpha * bar_a;
+                    }
+                }
+            } else if (wtype == 5.0) {
+                // Analog clock: fully vector-rendered with anti-aliased SDF (no pixel jaggies).
+                let hangle = u.widgets[wo + 19u];
+                let mangle = u.widgets[wo + 20u];
+                let sangle = u.widgets[wo + 21u];
+                let dial_border = u.widgets[wo + 22u] * min_d;
+                let hcol = widget_pal(wo, 0u);
+                let radius = wsize * min_d * 0.5;
+                if (wdist <= radius + dial_border) {
+                    // dial face: soft fill with AA
+                    let face = smoothstep(radius + 0.7, radius - 0.7, wdist);
+                    if (face > 0.004) {
+                        w_col += vec3<f32>(0.1, 0.1, 0.15) * 0.25 * walpha * face;
+                        w_a += 0.25 * walpha * face;
+                    }
+                    // border ring (AA)
+                    let bord = smoothstep(radius, radius - dial_border, wdist) * smoothstep(radius - dial_border - 0.7, radius - dial_border + 0.7, wdist);
+                    if (bord > 0.004) {
+                        w_col += hcol.rgb * hcol.a * walpha * bord;
+                        w_a += hcol.a * walpha * bord;
+                    }
+                    // ticks: minute + hour, drawn as radial rectangles with AA edges
+                    for (var tk = 0u; tk < 60u; tk = tk + 1u) {
+                        let ta = f32(tk) / 60.0 * 6.28318530718;
+                        let major = (tk % 5u == 0u);
+                        let dir = vec2<f32>(cos(ta), sin(ta));
+                        let tr0 = radius * select(0.84, 0.76, major);
+                        let tr1 = radius * 0.94;
+                        // distance along the radial direction
+                        let proj = dot(wd, dir);
+                        let perp = abs(dot(wd, vec2<f32>(-dir.y, dir.x)));
+                        let tw = select(radius * 0.012, radius * 0.024, major);
+                        let a1 = smoothstep(tr0 - 0.7, tr0 + 0.7, proj);
+                        let a2 = smoothstep(tr1 + 0.7, tr1 - 0.7, proj);
+                        let a3 = smoothstep(tw + 0.7, tw - 0.7, perp);
+                        let ta_a = a1 * a2 * a3;
+                        if (ta_a > 0.004) {
+                            w_col += hcol.rgb * hcol.a * walpha * 0.8 * ta_a;
+                            w_a += hcol.a * walpha * 0.8 * ta_a;
+                        }
+                    }
+                    // hands as AA segments (round caps come free from the segment SDF)
+                    let centre = vec2<f32>(0.0, 0.0);
+                    let hh = vec2<f32>(cos(hangle), sin(hangle)) * radius * 0.55;
+                    let mm = vec2<f32>(cos(mangle), sin(mangle)) * radius * 0.75;
+                    let ss = vec2<f32>(cos(sangle), sin(sangle)) * radius * 0.85;
+                    let hw = radius * 0.026;
+                    let mw = radius * 0.016;
+                    let sw = radius * 0.007;
+                    let ha = smoothstep(hw + 0.7, hw - 0.7, segment_dist(wd, centre, hh));
+                    if (ha > 0.004) {
+                        w_col += hcol.rgb * hcol.a * walpha * ha;
+                        w_a += hcol.a * walpha * ha;
+                    }
+                    let ma = smoothstep(mw + 0.7, mw - 0.7, segment_dist(wd, centre, mm));
+                    if (ma > 0.004) {
+                        w_col += hcol.rgb * hcol.a * walpha * ma;
+                        w_a += hcol.a * walpha * ma;
+                    }
+                    let sa = smoothstep(sw + 0.7, sw - 0.7, segment_dist(wd, centre, ss));
+                    if (sa > 0.004) {
+                        w_col += vec3<f32>(1.0, 0.3, 0.3) * walpha * sa;
+                        w_a += walpha * sa;
+                    }
+                    // centre hub
+                    let hub = smoothstep(radius * 0.03 + 0.7, radius * 0.03 - 0.7, wdist);
+                    if (hub > 0.004) {
+                        w_col += hcol.rgb * hcol.a * walpha * hub;
+                        w_a += hcol.a * walpha * hub;
+                    }
+                }
+            } else if (wtype == 4.0) {
+                // Cover widget: album art with a border, scaling with the music band.
+                let uv_x = u.widgets[wo + 7u];
+                let uv_y = u.widgets[wo + 8u];
+                let uv_w = u.widgets[wo + 9u];
+                let uv_h = u.widgets[wo + 10u];
+                let aspect = u.widgets[wo + 11u];
+                let wband = u.widgets[wo + 39u];
+                let wgrowth = u.widgets[wo + 19u];
+                let wborder = u.widgets[wo + 18u] * min_d;
+                // band energy for beat-scaling
+                var bamp = band_energy(0u, 128u);
+                if (wband == 1.0) { bamp = band_energy(0u, 32u); }
+                else if (wband == 2.0) { bamp = band_energy(32u, 96u); }
+                else if (wband == 3.0) { bamp = band_energy(96u, 128u); }
+                let scale = 1.0 + bamp * wgrowth;
+                let half = vec2<f32>(wsize * min_d * scale, wsize * min_d * scale * aspect) * 0.5;
+                // border colour from widget palette slot 0
+                let bcol = widget_pal(wo, 0u);
+                if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
+                    let dx = half.x - abs(wd.x);
+                    let dy = half.y - abs(wd.y);
+                    let mind = min(dx, dy);
+                    // border with AA
+                    let bord_a = smoothstep(wborder + 0.7, wborder - 0.7, mind);
+                    if (bord_a > 0.004) {
+                        w_col += bcol.rgb * bcol.a * walpha * bord_a;
+                        w_a += bcol.a * walpha * bord_a;
+                    }
+                    // content with AA inner edge
+                    let cont_a = smoothstep(wborder - 0.7, wborder + 0.7, mind);
+                    if (cont_a > 0.004) {
+                        let uv = vec2<f32>(
+                            uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,
+                            uv_y + (wd.y / (half.y * 2.0) + 0.5) * uv_h,
+                        );
+                        let tc = textureSample(widget_texture, widget_sampler, uv);
+                        w_col += tc.rgb * tc.a * walpha * cont_a;
+                        w_a += tc.a * walpha * cont_a;
                     }
                 }
             } else {
