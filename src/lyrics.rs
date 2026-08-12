@@ -84,15 +84,46 @@ pub fn parse_lrc(text: &str) -> LyricData {
         }
         // Enhanced LRC: inline <mm:ss.xx> word timestamps.
         let (plain, words) = parse_enhanced(content);
-        // Skip empty timed lines (instrumental pauses, "[00:15.72] " etc.) — they
-        // carry nothing to display and would make the prev/next rail drop lines.
-        if plain.trim().is_empty() && words.is_empty() {
-            continue;
-        }
+        // NOTE: empty timed lines are KEPT — they mark instrumental gaps that shape
+        // the timeline (when the next real line starts). Display skips them.
         for &t in &times {
             raw.push((t, plain.clone(), words.clone()));
         }
     }
+
+    raw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let lines = raw
+        .into_iter()
+        .map(|(t, text, words)| LyricLine {
+            time: t - offset,
+            text,
+            words,
+        })
+        .collect();
+    LyricData { lines, offset }
+}
+
+/// Index of the nearest real (non-empty) line at or before `idx`, or None.
+pub fn prev_real_line(lines: &[LyricLine], idx: usize) -> Option<usize> {
+    let mut i = idx;
+    while i > 0 {
+        i -= 1;
+        if !lines[i].text.trim().is_empty() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Index of the nearest real (non-empty) line at or after `idx`, or None.
+pub fn next_real_line(lines: &[LyricLine], idx: usize) -> Option<usize> {
+    for i in idx + 1..lines.len() {
+        if !lines[i].text.trim().is_empty() {
+            return Some(i);
+        }
+    }
+    None
+}
 
 /// True when a lyric line is a composer/credits attribution (not singable text).
 fn is_credit_line(text: &str) -> bool {
@@ -107,18 +138,6 @@ fn is_credit_line(text: &str) -> bool {
         && CREDIT_PREFIXES
             .iter()
             .any(|p| t.starts_with(p) || t.contains(&format!("：{}", p.trim_end_matches('：'))))
-}
-
-    raw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let lines = raw
-        .into_iter()
-        .map(|(t, text, words)| LyricLine {
-            time: t - offset,
-            text,
-            words,
-        })
-        .collect();
-    LyricData { lines, offset }
 }
 
 /// Parse a `[mm:ss(.xx)]` tag; None for metadata tags.
@@ -536,12 +555,19 @@ mod tests {
     }
 
     #[test]
-    fn empty_timed_lines_are_dropped() {
+    fn empty_lines_kept_in_timeline_but_skipped_for_display() {
         let d = parse_lrc("[00:01.00]第一行\n[00:02.00]   \n[00:03.00] 第二行 \n[00:04.00]\n[00:05.00]第三行\n");
-        assert_eq!(d.lines.len(), 3, "empty timed lines must be filtered");
-        assert_eq!(d.lines[0].text, "第一行");
-        assert_eq!(d.lines[1].text, "第二行");
-        assert_eq!(d.lines[2].text, "第三行");
+        // Empty timed lines stay in the data (they shape the timeline).
+        assert_eq!(d.lines.len(), 5, "empty lines must be KEPT in the timeline");
+        // But display helpers skip them when finding prev/next real lines.
+        // current = index 2 (第二行): prev real = index 0, next real = index 4.
+        assert_eq!(prev_real_line(&d.lines, 2), Some(0));
+        assert_eq!(next_real_line(&d.lines, 2), Some(4));
+        // At the first line there is no prev.
+        assert_eq!(prev_real_line(&d.lines, 0), None);
+        // Empty current line (index 3) still finds real neighbours.
+        assert_eq!(prev_real_line(&d.lines, 3), Some(2));
+        assert_eq!(next_real_line(&d.lines, 3), Some(4));
     }
 }
 

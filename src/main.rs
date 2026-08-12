@@ -1418,14 +1418,22 @@ impl App {
                     let Some(lt) = self.lyric_time() else { continue };
                     let Some(ldata) = &self.lyric_data else { continue };
                     let Some(ls) = lyrics::line_state(ldata, lt + w.lyric_offset) else { continue };
+                    // Instrumental gap: the current line is an empty timed marker —
+                    // hide the whole rail (nothing to show) until the next real line.
+                    if ldata.lines[ls.index].text.trim().is_empty() {
+                        continue;
+                    }
                     let cur = &ldata.lines[ls.index].text;
-                    let prev = if w.show_prev_next && ls.index > 0 {
-                        Some(ldata.lines[ls.index - 1].text.as_str())
+                    // Prev/next are the nearest REAL lines (skip empty instrumental gaps).
+                    let prev = if w.show_prev_next {
+                        lyrics::prev_real_line(&ldata.lines, ls.index)
+                            .map(|i| ldata.lines[i].text.as_str())
                     } else {
                         None
                     };
                     let next = if w.show_prev_next {
-                        ldata.lines.get(ls.index + 1).map(|l| l.text.as_str())
+                        lyrics::next_real_line(&ldata.lines, ls.index)
+                            .map(|i| ldata.lines[i].text.as_str())
                     } else {
                         None
                     };
