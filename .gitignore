@@ -2,3 +2,4 @@
 # 插件构建产物
 plugins/*/target/
 *.so
+.superpowers/
