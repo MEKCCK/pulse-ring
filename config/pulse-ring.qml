@@ -78,6 +78,14 @@ PulseRing {
             mirror: true; bandMode: "full"
             colorMode: "gradient"; colors: ["#00E5FF", "#69F0AE", "#7C4DFF", "#E040FB"]
         },
+
+        // 歌词（LRC，逐字卡拉OK高亮；来源：本地 lyrics 目录或网易云自动匹配）
+        Widget {
+            type: "lyric"; x: 0.5; y: 0.82
+            size: 0.7; fontSize: 42; showPrevNext: true
+            color: "#B8B4C8"        // 上一/下一行颜色（暗色）
+            colors: ["#EADDFF", "#FFD740", "#FFFFFF", "#B388FF"]  // 未唱 / 已唱 / 当前字 / 辉光
+        },
 ]
 
     // ================= 全局 =================

@@ -31,6 +31,7 @@ pub struct RingRenderer {
     particle_count_data: u32,
     particle_band_r_data: f32,
     render_scale: f32,
+    widget_bounds_data: [f32; 32],
     atlas_texture: Option<wgpu::Texture>,
     atlas_view: Option<wgpu::TextureView>,
     sampler: wgpu::Sampler,
@@ -103,6 +104,7 @@ struct Uniforms {
     overall_energy_val: f32,
     particle_count: u32,
     particle_band_r: f32,
+    widget_bounds: [f32; 32],
 }
 
 impl RingRenderer {
@@ -152,9 +154,14 @@ impl RingRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
         });
 
+        const UNIFORM_SIZE: u64 = std::mem::size_of::<Uniforms>() as u64;
+        assert!(
+            UNIFORM_SIZE <= 10832 + 128,
+            "uniform struct grew beyond reserved buffer: {UNIFORM_SIZE}"
+        );
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ring uniforms"),
-            size: 10832,
+            size: UNIFORM_SIZE,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -168,7 +175,7 @@ impl RingRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU32::new(10832).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
+                        min_binding_size: std::num::NonZeroU64::new(UNIFORM_SIZE),
                     },
                     count: None,
                 },
@@ -290,6 +297,7 @@ impl RingRenderer {
             particle_count_data: 0,
             particle_band_r_data: 0.0,
             render_scale: 1.0,
+            widget_bounds_data: [0.0; 32],
             atlas_texture: None,
             atlas_view: None,
             sampler: sampler.clone(),
@@ -340,6 +348,11 @@ impl RingRenderer {
         self.widget_count = (n / 40) as u32;
     }
 
+    /// Per-widget bounding radii (px), for the shader early-out.
+    pub fn set_widget_bounds(&mut self, data: &[f32; 32]) {
+        self.widget_bounds_data = *data;
+    }
+
     fn refresh_texture_bindings(&mut self) {
         if let Some(view) = &self.atlas_view {
             self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -354,11 +367,11 @@ impl RingRenderer {
         }
     }
 
-    /// Upload an RGBA image into atlas slot `index` (each slot is 256x256 in a 8x8 grid).
+    /// Upload an RGBA image into atlas slot `index` (each slot is 1024x1024 in a 2x2 grid).
     /// Returns the actual content UV rect (x, y, w, h) in atlas coordinates, or None.
     pub fn upload_texture(&mut self, index: usize, rgba: &[u8], w: u32, h: u32) -> Option<(f32, f32, f32, f32)> {
-        const SLOT: u32 = 512;
-        const GRID: u32 = 4;
+        const SLOT: u32 = 1024;
+        const GRID: u32 = 2;
         if index >= 64 || w == 0 || h == 0 || w > SLOT || h > SLOT {
             return None;
         }
@@ -405,7 +418,7 @@ impl RingRenderer {
 
     /// Atlas UV rect (x, y, w, h) for a slot, in 0..1.
     pub fn atlas_uv(index: usize) -> (f32, f32, f32, f32) {
-        const SLOT: f32 = 512.0;
+        const SLOT: f32 = 1024.0;
         let x = index as f32 * SLOT;
         (x / (SLOT * 4.0), 0.0, 1.0 / 4.0, 1.0)
     }
@@ -579,6 +592,7 @@ impl RingRenderer {
             overall_energy_val: self.overall_energy_data,
             particle_count: self.particle_count_data,
             particle_band_r: self.particle_band_r_data,
+            widget_bounds: self.widget_bounds_data,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -692,6 +706,7 @@ const SHADER_SRC: &str = stringify!(
         overall_energy_val: f32,
         particle_count: u32,
         particle_band_r: f32,
+        widget_bounds: array<f32, 32>,
     };
 
     @group(0) @binding(1) var widget_texture: texture_2d<f32>;
@@ -1081,6 +1096,11 @@ const SHADER_SRC: &str = stringify!(
             let wpos = vec2<f32>(wx, wy) * u.resolution;
             let wd = in.pos.xy - wpos;
             let wdist = length(wd);
+            // Early-out: pixels outside this widget's conservative bounding circle skip
+            // all widget SDF math (widgets are small; most pixels are far away).
+            if (wdist > u.widget_bounds[wi]) {
+                continue;
+            }
             if (wtype == 0.0) {
                 // Ring widget: fully independent style from its own uniform fields.
                 let wshape = u.widgets[wo + 12u];
@@ -1331,6 +1351,41 @@ const SHADER_SRC: &str = stringify!(
                     let tc = textureSample(widget_texture, widget_sampler, uv);
                     w_col += tc.rgb * tc.a * walpha;
                     w_a += tc.a * walpha;
+                }
+            } else if (wtype == 7.0) {
+                // Lyric widget: textured quad with GPU karaoke. The current line's band
+                // is revealed left-to-right by the progress uniform; the lit gradient is
+                // baked in the texture, unrevealed pixels are dimmed. Zero re-raster.
+                let uv_x = u.widgets[wo + 7u];
+                let uv_y = u.widgets[wo + 8u];
+                let uv_w = u.widgets[wo + 9u];
+                let uv_h = u.widgets[wo + 10u];
+                let aspect = u.widgets[wo + 11u];
+                let kprogress = u.widgets[wo + 18u];
+                let line_top = u.widgets[wo + 19u];
+                let line_h = u.widgets[wo + 20u];
+                let kmode = u.widgets[wo + 21u];
+                let half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
+                if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
+                    let uv = vec2<f32>(
+                        uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,
+                        uv_y + (wd.y / (half.y * 2.0) + 0.5) * uv_h,
+                    );
+                    let tc = textureSample(widget_texture, widget_sampler, uv);
+                    var reveal = 1.0;
+                    if (kmode > 0.5) {
+                        // Inside the current line's band (fy = 0..1 within the banner):
+                        // lit where fx < progress.
+                        let fy = (uv.y - uv_y) / max(uv_h, 0.0001);
+                        let in_line = (fy >= line_top) && (fy < line_top + line_h);
+                        if (in_line) {
+                            let fx = (uv.x - uv_x) / max(uv_w, 0.0001);
+                            reveal = smoothstep(fx - 0.02, fx, kprogress);
+                        }
+                    }
+                    let dim = 0.45 + 0.55 * reveal;
+                    w_col += tc.rgb * tc.a * walpha * dim;
+                    w_a += tc.a * walpha * dim;
                 }
             } else {
                 // Image / clock widget.

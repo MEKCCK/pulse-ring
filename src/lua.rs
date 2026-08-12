@@ -63,6 +63,7 @@ impl LuaState {
                     "bars" => { w.widget_type = crate::config::WidgetType::Bars; w.size = 0.5; w.x = x; w.y = y; }
                     "cover" => { w.widget_type = crate::config::WidgetType::Cover; w.size = 0.18; w.x = x; w.y = y; }
                     "analog" => { w.widget_type = crate::config::WidgetType::Analog; w.size = 0.22; w.x = x; w.y = y; }
+                    "lyric" | "lyrics" => { w.widget_type = crate::config::WidgetType::Lyric; w.size = 0.6; w.font_size = 40.0; w.x = x; w.y = y; }
                     _ => { w.widget_type = crate::config::WidgetType::Ring; w.size = 0.6; w.x = x; w.y = y; }
                 }
                 cfg.widgets.push(w);
@@ -196,11 +197,21 @@ pub struct MusicInfo {
     pub title: String,
     pub artist: String,
     pub album: String,
+    /// MPRIS position in seconds (from the last poll).
+    pub position_sec: f32,
+    /// True while the player is in the Playing state.
+    pub playing: bool,
 }
 
 impl Default for MusicInfo {
     fn default() -> Self {
-        Self { title: String::new(), artist: String::new(), album: String::new() }
+        Self {
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            position_sec: 0.0,
+            playing: false,
+        }
     }
 }
 
@@ -217,6 +228,8 @@ fn sync_music_time(lua: &Lua, music: &MusicInfo, elapsed: f32) -> mlua::Result<(
     m.set("title", music.title.clone())?;
     m.set("artist", music.artist.clone())?;
     m.set("album", music.album.clone())?;
+    m.set("position", music.position_sec)?;
+    m.set("playing", music.playing)?;
     let t: Table = lua.globals().get("time")?;
     let (h, mi, s, _) = crate::main_now_hmsparts();
     t.set("hour", h)?;
