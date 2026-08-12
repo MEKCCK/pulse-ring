@@ -5,13 +5,14 @@
 //! per-line karaoke progress.
 
 /// One lyric line with an optional word-level timeline (enhanced LRC `<mm:ss.xx>`).
-/// `words` entries are `(start, end)` in seconds relative to the line's start.
+/// `words` entries are `(start, end, text)` — start/end in seconds relative to the
+/// line's start, text is the word's own characters (used for per-word karaoke colouring).
 #[derive(Debug, Clone)]
 pub struct LyricLine {
     /// Start time in seconds (after applying the global offset).
     pub time: f32,
     pub text: String,
-    pub words: Vec<(f32, f32)>,
+    pub words: Vec<(f32, f32, String)>,
 }
 
 /// Parsed lyric document.
@@ -39,7 +40,7 @@ pub struct LineState {
 /// `[by:]`) and enhanced word timestamps `<mm:ss.xx>`.
 pub fn parse_lrc(text: &str) -> LyricData {
     let mut offset = 0.0f32;
-    let mut raw: Vec<(f32, String, Vec<(f32, f32)>)> = Vec::new();
+    let mut raw: Vec<(f32, String, Vec<(f32, f32, String)>)> = Vec::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -102,9 +103,9 @@ fn parse_time_tag(tag: &str) -> Option<f32> {
     Some(mm * 60.0 + ss)
 }
 
-/// Strip `<mm:ss.xx>` word markers, returning plain text and word (start, end) pairs
-/// relative to the line start.
-fn parse_enhanced(text: &str) -> (String, Vec<(f32, f32)>) {
+/// Strip `<mm:ss.xx>` word markers, returning plain text and word (start, end, text)
+/// triples relative to the line start.
+fn parse_enhanced(text: &str) -> (String, Vec<(f32, f32, String)>) {
     let mut segs: Vec<(f32, String)> = Vec::new();
     let mut first: Option<f32> = None;
     let mut rest = text;
@@ -122,13 +123,15 @@ fn parse_enhanced(text: &str) -> (String, Vec<(f32, f32)>) {
         segs.push((t - base, String::new()));
         rest = &after[gt + 1..];
     }
+    if segs.is_empty() {
+        // No word timestamps at all: plain line, no per-word timeline.
+        return (text.to_string(), Vec::new());
+    }
     if let Some(last) = segs.last_mut() {
         last.1.push_str(rest);
-    } else if !rest.is_empty() {
-        segs.push((0.0, rest.to_string()));
     }
     let mut plain = String::new();
-    let mut words: Vec<(f32, f32)> = Vec::new();
+    let mut words: Vec<(f32, f32, String)> = Vec::new();
     for i in 0..segs.len() {
         plain.push_str(&segs[i].1);
         let start = segs[i].0;
@@ -138,7 +141,7 @@ fn parse_enhanced(text: &str) -> (String, Vec<(f32, f32)>) {
             .unwrap_or(start + 1.0)
             .max(start + 0.01);
         if !segs[i].1.is_empty() {
-            words.push((start, end));
+            words.push((start, end, segs[i].1.clone()));
         }
     }
     (plain, words)
@@ -173,7 +176,7 @@ pub fn line_state(data: &LyricData, t: f32) -> Option<LineState> {
         let rel = t - start;
         line.words
             .iter()
-            .position(|&(ws, we)| rel >= ws && rel < we)
+            .position(|(ws, we, _)| rel >= *ws && rel < *we)
             .unwrap_or(line.words.len().saturating_sub(1))
     };
     Some(LineState { index: idx, progress, word })
@@ -274,19 +277,39 @@ pub fn fetch_lyrics(
     if title.trim().is_empty() {
         return None;
     }
+    if let Some(s) = fetch_local_or_cache(title, artist, cfg_dir, cache_dir) {
+        return Some(s);
+    }
+    let fetched = fetch_online(title, artist, std::time::Duration::from_secs(3))?;
+    let _ = std::fs::create_dir_all(cache_dir);
+    let _ = std::fs::write(&cache_path(title, artist, cache_dir), &fetched);
+    Some(fetched)
+}
+
+/// Cache file path for a track.
+pub fn cache_path(title: &str, artist: &str, cache_dir: &str) -> String {
+    format!("{cache_dir}/{}.lrc", sanitize(&format!("{artist}-{title}")))
+}
+
+/// Instant lookup: local lyrics dir + disk cache only — NO network. Safe to call on
+/// the main thread on every track change so previously-heard songs show lyrics
+/// immediately instead of waiting for a network round-trip.
+pub fn fetch_local_or_cache(
+    title: &str,
+    artist: &str,
+    cfg_dir: &str,
+    cache_dir: &str,
+) -> Option<String> {
     if let Some(s) = load_local(cfg_dir, title, artist) {
         return Some(s);
     }
-    let cache_path = format!("{cache_dir}/{}.lrc", sanitize(&format!("{artist}-{title}")));
+    let cache_path = cache_path(title, artist, cache_dir);
     if let Ok(s) = std::fs::read_to_string(&cache_path) {
         if !s.trim().is_empty() {
             return Some(s);
         }
     }
-    let fetched = fetch_online(title, artist, std::time::Duration::from_secs(6))?;
-    let _ = std::fs::create_dir_all(cache_dir);
-    let _ = std::fs::write(&cache_path, &fetched);
-    Some(fetched)
+    None
 }
 
 #[cfg(test)]
@@ -330,11 +353,11 @@ mod tests {
         assert_eq!(d.lines.len(), 1);
         assert_eq!(d.lines[0].text, "你好世界");
         assert_eq!(d.lines[0].words.len(), 3);
-        // first word starts at 0, second at 1.0, third at 2.5
+        // first word starts at 0, second at 1.0, third at 2.5 — with their own text
         let w = &d.lines[0].words;
-        assert!((w[0].0).abs() < 1e-4 && (w[0].1 - 1.0).abs() < 1e-4);
-        assert!((w[1].0 - 1.0).abs() < 1e-4 && (w[1].1 - 2.5).abs() < 1e-4);
-        assert!((w[2].0 - 2.5).abs() < 1e-4);
+        assert!((w[0].0).abs() < 1e-4 && (w[0].1 - 1.0).abs() < 1e-4 && w[0].2 == "你");
+        assert!((w[1].0 - 1.0).abs() < 1e-4 && (w[1].1 - 2.5).abs() < 1e-4 && w[1].2 == "好");
+        assert!((w[2].0 - 2.5).abs() < 1e-4 && w[2].2 == "世界");
     }
 
     #[test]

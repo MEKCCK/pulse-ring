@@ -84,7 +84,7 @@ PulseRing {
             type: "lyric"; x: 0.5; y: 0.82
             size: 0.7; fontSize: 42; showPrevNext: true
             color: "#B8B4C8"        // 上一/下一行颜色（暗色）
-            colors: ["#EADDFF", "#FFD740"]  // 当前行 / 卡拉OK进度色
+            colors: ["#EADDFF", "#FFD740", "#FFFFFF", "#B388FF"]  // 未唱 / 已唱 / 当前字 / 辉光
         },
 ]
 

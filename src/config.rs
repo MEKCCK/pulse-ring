@@ -84,6 +84,8 @@ pub struct WidgetConfig {
     // ---- lyric widget ----
     /// Show the previous/next lines dimmed above/below the current line.
     pub show_prev_next: bool,
+    /// Manual sync nudge in seconds (positive = lyrics later).
+    pub lyric_offset: f32,
 }
 
 impl Default for WidgetConfig {
@@ -123,6 +125,7 @@ impl Default for WidgetConfig {
             tick_count: 12.0,
             dial_border: 0.004,
             show_prev_next: true,
+            lyric_offset: 0.0,
         }
     }
 }
@@ -737,6 +740,7 @@ fn parse_widget(obj: &[(String, Val)]) -> Option<WidgetConfig> {
             "dialBorder" => w.dial_border = num(v)?,
             "coverGrowth" => w.cover_growth = num(v)?,
             "showPrevNext" => w.show_prev_next = num(v)? > 0.0,
+            "lyricOffset" => w.lyric_offset = num(v)?,
             "bandMode" => {
                 if let Val::Str(s) = v {
                     w.band_mode = match s.to_ascii_lowercase().as_str() {
