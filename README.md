@@ -101,5 +101,5 @@ GPL-3.0-or-later © MEKCCK，详见 [LICENSE](LICENSE)。
 
 ## 性能 / 帧率
 
-- **自适应帧率**：有音频时 30fps（`PULSE_RING_MAX_FPS=60` 可开 60fps）；静音 2 秒后降至 `PULSE_RING_IDLE_FPS`（默认 15，可设 5~30），保证空闲动画（呼吸/自转/粒子/时钟）依然流畅的同时省电
+- **帧率**：始终 30fps（`PULSE_RING_MAX_FPS=60` 可开 60fps），空闲动画（呼吸/自转/粒子/时钟）保持流畅；若想省电，可显式设置 `PULSE_RING_IDLE_FPS=15` 在静音 2 秒后降帧（可选，默认不降）
 - **性能剖析**：`PULSE_RING_PROFILE=1` 运行，每 60 帧输出各阶段耗时（pull_audio/lua/plugins/particles/widgets/render）
