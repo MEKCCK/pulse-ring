@@ -1261,7 +1261,7 @@ fn rasterize_lyric_image(
 impl App {
     /// Compute widget uniform data (12 f32 each). Returns the 96-float layout.
     /// `widgets` is the per-frame snapshot taken once in compute_scene.
-    fn prepare_widgets(&mut self, widgets: &[crate::config::WidgetConfig]) -> [f32; 1280] {
+    fn prepare_widgets(&mut self, widgets: &[crate::config::WidgetConfig], min_d: f32) -> [f32; 1280] {
         use crate::config::WidgetType;
         let mut data = [0.0f32; 1280];
         let mut tex_index = 0u32;
@@ -1524,10 +1524,12 @@ impl App {
                         // Atlas slots are 1024px max — scale the banner down to fit.
                         let img = fit_slot(img);
                         let (iw, ih) = (img.w as f32, img.h as f32);
+                        // Render the banner at its NATIVE size: the quad width tracks the
+                        // rasterised width, so the text is always `fontSize` on screen.
+                        // (A fixed quad width would stretch short lines into huge text.)
+                        data[o + 3] = (iw / min_d).clamp(0.01, 0.95);
                         data[o + 6] = tex_index as f32;
-                        // Aspect sanity: a lyric banner is a wide strip; guard against
-                        // any stale/garbled state ever rendering a huge quad.
-                        data[o + 11] = (ih / iw).clamp(0.01, 0.6);
+                        data[o + 11] = ih / iw;
                         // Shader-side karaoke uniforms: progress + current-line UV rect.
                         data[o + 18] = if karaoke_gpu { ls.progress.clamp(0.0, 1.0) } else { 0.0 };
                         data[o + 19] = line_top;
@@ -1861,7 +1863,7 @@ impl App {
         let t_widgets = std::time::Instant::now();
         let widgets_cfg: Vec<crate::config::WidgetConfig> =
             self.cfg.widgets.iter().take(32).cloned().collect();
-        let widgets = self.prepare_widgets(&widgets_cfg);
+        let widgets = self.prepare_widgets(&widgets_cfg, sw.min(sh) as f32);
         self.profile_mark("widgets", t_widgets);
         let bar_energy = compute_bar_energy(&render_bands);
         let overall = compute_overall_energy(&render_bands);
