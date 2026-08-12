@@ -31,6 +31,7 @@ pub struct RingRenderer {
     particle_count_data: u32,
     particle_band_r_data: f32,
     render_scale: f32,
+    widget_bounds_data: [f32; 32],
     atlas_texture: Option<wgpu::Texture>,
     atlas_view: Option<wgpu::TextureView>,
     sampler: wgpu::Sampler,
@@ -103,6 +104,7 @@ struct Uniforms {
     overall_energy_val: f32,
     particle_count: u32,
     particle_band_r: f32,
+    widget_bounds: [f32; 32],
 }
 
 impl RingRenderer {
@@ -152,9 +154,14 @@ impl RingRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
         });
 
+        const UNIFORM_SIZE: u64 = std::mem::size_of::<Uniforms>() as u64;
+        assert!(
+            UNIFORM_SIZE <= 10832 + 128,
+            "uniform struct grew beyond reserved buffer: {UNIFORM_SIZE}"
+        );
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ring uniforms"),
-            size: 10832,
+            size: UNIFORM_SIZE,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -168,7 +175,7 @@ impl RingRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU32::new(10832).map(|n| n.get() as u64).and_then(std::num::NonZeroU64::new),
+                        min_binding_size: std::num::NonZeroU64::new(UNIFORM_SIZE),
                     },
                     count: None,
                 },
@@ -290,6 +297,7 @@ impl RingRenderer {
             particle_count_data: 0,
             particle_band_r_data: 0.0,
             render_scale: 1.0,
+            widget_bounds_data: [0.0; 32],
             atlas_texture: None,
             atlas_view: None,
             sampler: sampler.clone(),
@@ -338,6 +346,11 @@ impl RingRenderer {
         let n = data.len().min(self.widget_data.len());
         self.widget_data[..n].copy_from_slice(&data[..n]);
         self.widget_count = (n / 40) as u32;
+    }
+
+    /// Per-widget bounding radii (px), for the shader early-out.
+    pub fn set_widget_bounds(&mut self, data: &[f32; 32]) {
+        self.widget_bounds_data = *data;
     }
 
     fn refresh_texture_bindings(&mut self) {
@@ -579,6 +592,7 @@ impl RingRenderer {
             overall_energy_val: self.overall_energy_data,
             particle_count: self.particle_count_data,
             particle_band_r: self.particle_band_r_data,
+            widget_bounds: self.widget_bounds_data,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -692,6 +706,7 @@ const SHADER_SRC: &str = stringify!(
         overall_energy_val: f32,
         particle_count: u32,
         particle_band_r: f32,
+        widget_bounds: array<f32, 32>,
     };
 
     @group(0) @binding(1) var widget_texture: texture_2d<f32>;
@@ -1081,6 +1096,11 @@ const SHADER_SRC: &str = stringify!(
             let wpos = vec2<f32>(wx, wy) * u.resolution;
             let wd = in.pos.xy - wpos;
             let wdist = length(wd);
+            // Early-out: pixels outside this widget's conservative bounding circle skip
+            // all widget SDF math (widgets are small; most pixels are far away).
+            if (wdist > u.widget_bounds[wi]) {
+                continue;
+            }
             if (wtype == 0.0) {
                 // Ring widget: fully independent style from its own uniform fields.
                 let wshape = u.widgets[wo + 12u];

@@ -534,6 +534,25 @@ fn compute_overall_energy(bands: &[f32; NBANDS]) -> f32 {
     acc / 80.0
 }
 
+/// Per-widget conservative bounding radius in pixels, used by the shader to skip
+/// pixels outside each widget's region before running its SDF math.
+fn compute_widget_bounds(widgets: &[crate::config::WidgetConfig], width: u32, height: u32) -> [f32; 32] {
+    use crate::config::WidgetType;
+    let mut out = [0.0f32; 32];
+    let min_d = width.min(height) as f32;
+    for (i, w) in widgets.iter().take(32).enumerate() {
+        let b = match w.widget_type {
+            WidgetType::Ring => (w.base_radius + w.growth + w.halo_size + 0.05) * w.size * min_d,
+            WidgetType::Bars => w.size.max(w.bar_height) * min_d * 1.05,
+            WidgetType::Clock | WidgetType::Analog => (w.size * 0.5 + w.dial_border) * min_d + min_d * 0.01,
+            WidgetType::Image | WidgetType::Cover => w.size * min_d * 0.75 + (w.border_width + w.cover_growth) * min_d,
+            WidgetType::Plugin => w.size * min_d * 0.75,
+        };
+        out[i] = b.max(1.0);
+    }
+    out
+}
+
 fn vec2_angle(a: f32) -> (f32, f32) {
     (a.cos(), a.sin())
 }
@@ -1223,6 +1242,8 @@ impl App {
             }
         }
         renderer.set_widgets(&widgets);
+        let widget_bounds = compute_widget_bounds(&scene.widgets_cfg, width, height);
+        renderer.set_widget_bounds(&widget_bounds);
         renderer.resize(width, height);
         renderer.set_auto_rotate(scene.rotate_rad);
         renderer.set_bar_energy(&scene.bar_energy);
@@ -1319,5 +1340,20 @@ PulseRing {
         let ov = super::compute_overall_energy(&bands);
         // 1.0 / 80 over mid bands 16..96
         assert!((ov - 1.0 / 80.0).abs() < 1e-6, "ov={ov}");
+    }
+
+    #[test]
+    fn widget_bounds_are_finite_and_cover_widgets() {
+        use crate::config::{WidgetConfig, WidgetType};
+        let mut w = WidgetConfig::default();
+        w.widget_type = WidgetType::Ring;
+        w.size = 0.2;
+        w.base_radius = 0.13;
+        w.growth = 0.2;
+        w.halo_size = 0.12;
+        let b = super::compute_widget_bounds(&[w], 1920, 1080);
+        // min_d = 1080; bound = (0.13+0.2+0.12+0.05)*0.2*1080 = 108
+        assert!((b[0] - 108.0).abs() < 1.0, "b[0]={}", b[0]);
+        assert!(b[1..].iter().all(|&v| v == 0.0));
     }
 }
