@@ -95,6 +95,11 @@ function transformBands(bands) ... end
 
 `pkill pulse-ring`
 
+## 已知限制 / Known Limitations
+
+- **渲染管线仍不完善，性能尚有提升空间**：当前采用单全屏三角形 + 巨型 fragment shader（所有效果逐像素 SDF 计算）的架构，复杂配置（多 widget、粒子、魔法阵启动动画）在低端 GPU 上开销较大；粒子计算 GPU 化等优化尚未完成。
+- 歌词逐帧光栅化已在后台线程执行，但首次加载/换歌时需等待网络获取（可放本地 LRC 或依赖磁盘缓存即时命中）。
+
 ## 许可证
 
 AGPL-3.0-or-later © MEKCCK，详见 [LICENSE](LICENSE)。
