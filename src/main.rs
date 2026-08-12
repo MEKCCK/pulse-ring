@@ -922,13 +922,28 @@ fn fit_slot(img: ImageData) -> ImageData {
     let nw = ((img.w as f32 * scale).floor() as u32).max(1);
     let nh = ((img.h as f32 * scale).floor() as u32).max(1);
     let mut out = ImageData { w: nw, h: nh, rgba: vec![0u8; (nw * nh * 4) as usize] };
+    // Bilinear sampling: smooth edges instead of blocky point-sampling when a
+    // banner is scaled down to fit the atlas slot.
     for y in 0..nh {
         for x in 0..nw {
-            let sx = ((x as f32 + 0.5) / scale - 0.5).max(0.0) as usize;
-            let sy = ((y as f32 + 0.5) / scale - 0.5).max(0.0) as usize;
-            let si = (sy * img.w as usize + sx) * 4;
+            let fx = ((x as f32 + 0.5) / scale - 0.5).clamp(0.0, img.w as f32 - 1.0001);
+            let fy = ((y as f32 + 0.5) / scale - 0.5).clamp(0.0, img.h as f32 - 1.0001);
+            let x0 = fx.floor() as usize;
+            let y0 = fy.floor() as usize;
+            let x1 = (x0 + 1).min(img.w as usize - 1);
+            let y1 = (y0 + 1).min(img.h as usize - 1);
+            let tx = fx - x0 as f32;
+            let ty = fy - y0 as f32;
+            let i00 = (y0 * img.w as usize + x0) * 4;
+            let i01 = (y0 * img.w as usize + x1) * 4;
+            let i10 = (y1 * img.w as usize + x0) * 4;
+            let i11 = (y1 * img.w as usize + x1) * 4;
             let di = ((y * nw + x) * 4) as usize;
-            out.rgba[di..di + 4].copy_from_slice(&img.rgba[si..si + 4]);
+            for c in 0..4 {
+                let top = img.rgba[i00 + c] as f32 * (1.0 - tx) + img.rgba[i01 + c] as f32 * tx;
+                let bot = img.rgba[i10 + c] as f32 * (1.0 - tx) + img.rgba[i11 + c] as f32 * tx;
+                out.rgba[di + c] = (top * (1.0 - ty) + bot * ty).round() as u8;
+            }
         }
     }
     out
@@ -990,8 +1005,6 @@ struct LyricStyle {
     sung: [f32; 4],
     /// Current word highlight.
     cur: [f32; 4],
-    /// Glow colour behind the current word.
-    glow: [f32; 4],
     show_prev_next: bool,
 }
 
@@ -1034,34 +1047,6 @@ fn blit_text(
             });
         }
     }
-}
-
-/// Draw a word; if `glow` is set, first stamp a soft halo by re-drawing the word at
-/// eight small offsets, then the crisp word on top.
-fn blit_word(
-    img: &mut ImageData,
-    font: &rusttype::Font,
-    text: &str,
-    scale: rusttype::Scale,
-    base_x: f32,
-    baseline_y: f32,
-    color: [f32; 4],
-    glow: Option<[f32; 4]>,
-    alpha: f32,
-) {
-    if let Some(gc) = glow {
-        if gc[3] > 0.004 {
-            let r = 2.5;
-            for (ox, oy) in [
-                (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r),
-                (r * 0.71, r * 0.71), (r * 0.71, -r * 0.71),
-                (-r * 0.71, r * 0.71), (-r * 0.71, -r * 0.71),
-            ] {
-                blit_text(img, font, text, scale, base_x + ox, baseline_y + oy, gc, alpha * 0.45, None);
-            }
-        }
-    }
-    blit_text(img, font, text, scale, base_x, baseline_y, color, alpha, None);
 }
 
 fn dim_color(c: [f32; 4]) -> [f32; 4] {
@@ -1208,18 +1193,6 @@ fn rasterize_lyric_image(
     }
     let base_x = ((w as i64 - cur_w as i64) / 2).max(0) as f32;
     let baseline = cur_ascent + cur_top as f32;
-    // Current line: fully lit gradient with a soft glow halo.
-    if st.glow[3] > 0.004 {
-        let r = 3.0;
-        for (ox, oy) in [
-            (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r),
-            (r * 0.71, r * 0.71), (r * 0.71, -r * 0.71),
-            (-r * 0.71, r * 0.71), (-r * 0.71, -r * 0.71),
-        ] {
-            blit_text(&mut img, font, current, cur_scale, base_x + ox, baseline + oy,
-                st.glow, 0.35, None);
-        }
-    }
     let stops = [st.sung, mix_color(st.sung, st.cur, 0.55), st.cur];
     blit_gradient_clipped(&mut img, font, current, cur_scale, base_x, baseline, &stops, cur_w as f32, f32::MAX, 1.0);
     if show_next {
@@ -1453,7 +1426,6 @@ impl App {
                         base: w.colors.first().copied().unwrap_or([0.85, 0.9, 1.0, 1.0]),
                         sung: w.colors.get(1).copied().unwrap_or([1.0, 0.78, 0.35, 1.0]),
                         cur: w.colors.get(2).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]),
-                        glow: w.colors.get(3).copied().unwrap_or([0.7, 0.53, 1.0, 0.75]),
                         show_prev_next: w.show_prev_next,
                     };
                     let sig = format!(
@@ -2061,7 +2033,6 @@ PulseRing {
             base: [0.85, 0.9, 1.0, 1.0],
             sung: [1.0, 0.78, 0.35, 1.0],
             cur: [1.0, 1.0, 1.0, 1.0],
-            glow: [0.7, 0.53, 1.0, 0.75],
             show_prev_next: false,
         };
         // Current line is baked fully lit (gold -> white gradient across its width).
@@ -2094,7 +2065,6 @@ PulseRing {
             base: [0.85, 0.9, 1.0, 1.0],
             sung: [1.0, 0.78, 0.35, 1.0],
             cur: [1.0, 1.0, 1.0, 1.0],
-            glow: [0.0, 0.0, 0.0, 0.0],
             show_prev_next: true,
         };
         // prev + current + next: the current line must be far brighter than the dim
