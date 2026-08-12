@@ -367,11 +367,11 @@ impl RingRenderer {
         }
     }
 
-    /// Upload an RGBA image into atlas slot `index` (each slot is 256x256 in a 8x8 grid).
+    /// Upload an RGBA image into atlas slot `index` (each slot is 1024x1024 in a 2x2 grid).
     /// Returns the actual content UV rect (x, y, w, h) in atlas coordinates, or None.
     pub fn upload_texture(&mut self, index: usize, rgba: &[u8], w: u32, h: u32) -> Option<(f32, f32, f32, f32)> {
-        const SLOT: u32 = 512;
-        const GRID: u32 = 4;
+        const SLOT: u32 = 1024;
+        const GRID: u32 = 2;
         if index >= 64 || w == 0 || h == 0 || w > SLOT || h > SLOT {
             return None;
         }
@@ -418,7 +418,7 @@ impl RingRenderer {
 
     /// Atlas UV rect (x, y, w, h) for a slot, in 0..1.
     pub fn atlas_uv(index: usize) -> (f32, f32, f32, f32) {
-        const SLOT: f32 = 512.0;
+        const SLOT: f32 = 1024.0;
         let x = index as f32 * SLOT;
         (x / (SLOT * 4.0), 0.0, 1.0 / 4.0, 1.0)
     }

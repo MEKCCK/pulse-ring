@@ -105,6 +105,10 @@ struct App {
     // Per-widget clock cache: (last_text, tex_w, tex_h, tex_index)
     clock_cache: [(String, u32, u32, u32); 8],
     texture_slots: Vec<Option<ImageData>>,
+    /// Which texture slots changed this frame and still need a GPU upload.
+    texture_dirty: Vec<bool>,
+    /// True when the cover image changed and every renderer's atlas needs it.
+    cover_dirty: bool,
     widget_uvs: [(f32, f32, f32, f32); 32],
     cover_rx: std::sync::mpsc::Receiver<ImageData>,
     last_cover_path: String,
@@ -215,6 +219,8 @@ fn main() {
         font: std::sync::Arc::new(load_font()),
         clock_cache: std::array::from_fn(|_| (String::new(), 0, 0, 0)),
         texture_slots: vec![None; 16],
+        texture_dirty: vec![false; 16],
+        cover_dirty: true,
         widget_uvs: [(0.0, 0.0, 0.0, 0.0); 32],
         cover_rx: spawn_cover_thread(),
         last_cover_path: String::new(),
@@ -855,9 +861,9 @@ fn load_png(path: &str) -> Option<ImageData> {
     Some(ImageData { w, h, rgba })
 }
 
-/// Scale an image down (bilinear-ish) to fit a 256x256 atlas slot, keeping aspect.
+/// Scale an image down (bilinear-ish) to fit a 1024x1024 atlas slot, keeping aspect.
 fn fit_slot(img: ImageData) -> ImageData {
-    const MAX: u32 = 512;
+    const MAX: u32 = 1024;
     if img.w <= MAX && img.h <= MAX {
         return img;
     }
@@ -1342,6 +1348,7 @@ impl App {
                         self.cover_loaded = true;
                         self.cover_aspect = img.h as f32 / img.w as f32;
                         self.current_cover = Some(img);
+                        self.cover_dirty = true;
                         log::info!("cover: new cover stored ({}x{})", self.cover_aspect, 0);
                     }
                 }
@@ -1364,6 +1371,7 @@ impl App {
                         data[o + 6] = tex_index as f32;
                         data[o + 11] = ih / iw; // aspect
                         self.texture_slots[tex_index as usize] = Some(img);
+                        self.texture_dirty[tex_index as usize] = true;
                         tex_index += 1;
                     }
                 }
@@ -1378,6 +1386,7 @@ impl App {
                         let (iw, ih) = (img.w, img.h);
                         ti = tex_index;
                         self.texture_slots[ti as usize] = Some(img);
+                        self.texture_dirty[ti as usize] = true;
                         self.clock_cache[slot] = (txt.clone(), iw, ih, ti);
                         data[o + 11] = ih as f32 / iw as f32;
                         if ti >= tex_index {
@@ -1483,12 +1492,13 @@ impl App {
                         }
                     };
                     if let Some(img) = rendered {
-                        // Atlas slots are 512px max — scale the banner down to fit.
+                        // Atlas slots are 1024px max — scale the banner down to fit.
                         let img = fit_slot(img);
                         let (iw, ih) = (img.w as f32, img.h as f32);
                         data[o + 6] = tex_index as f32;
                         data[o + 11] = ih / iw; // aspect
                         self.texture_slots[tex_index as usize] = Some(img);
+                        self.texture_dirty[tex_index as usize] = true;
                         tex_index += 1;
                     } else {
                         continue;
@@ -1653,6 +1663,7 @@ impl App {
                 let ti = 8 + i;
                 let img = ImageData { w: *w, h: *h, rgba: rgba.clone() };
                 self.texture_slots[ti] = Some(img);
+                self.texture_dirty[ti] = true;
             }
         }
     }
@@ -1692,6 +1703,9 @@ impl App {
                 }
             }
         }
+        // Every renderer has now seen this frame's texture changes; reset for the next.
+        self.texture_dirty.fill(false);
+        self.cover_dirty = false;
         self.profile_maybe_log();
     }
 
@@ -1838,22 +1852,28 @@ impl App {
         // Local mutable copy so per-renderer atlas UVs can be patched in.
         let mut widgets = scene.widgets;
         let renderer = &mut self.outputs[idx].renderer;
-        // Cover texture: upload to every renderer independently (multi-monitor safe).
-        if let Some(img) = &self.current_cover {
-            if let Some((ux, uy, uw, uh)) = renderer.upload_texture(self.cover_tex_index, &img.rgba, img.w, img.h) {
-                log::info!("cover: uploaded slot={} uv=({:.3},{:.3},{:.3},{:.3})", self.cover_slot, ux, uy, uw, uh);
-                self.widget_uvs[self.cover_slot] = (ux, uy, uw, uh);
-                // also write into the local widgets array so this frame sees it
-                let wo = self.cover_slot * 40;
-                widgets[wo + 7] = ux;
-                widgets[wo + 8] = uy;
-                widgets[wo + 9] = uw;
-                widgets[wo + 10] = uh;
+        // Cover texture: upload only when it changed (multi-monitor safe — each
+        // renderer owns its own atlas, so every output gets the upload once).
+        if self.cover_dirty {
+            if let Some(img) = &self.current_cover {
+                if let Some((ux, uy, uw, uh)) = renderer.upload_texture(self.cover_tex_index, &img.rgba, img.w, img.h) {
+                    log::info!("cover: uploaded slot={} uv=({:.3},{:.3},{:.3},{:.3})", self.cover_slot, ux, uy, uw, uh);
+                    self.widget_uvs[self.cover_slot] = (ux, uy, uw, uh);
+                    // also write into the local widgets array so this frame sees it
+                    let wo = self.cover_slot * 40;
+                    widgets[wo + 7] = ux;
+                    widgets[wo + 8] = uy;
+                    widgets[wo + 9] = uw;
+                    widgets[wo + 10] = uh;
+                }
             }
         }
-        // Upload every texture slot to THIS renderer every frame (multi-monitor safe):
+        // Upload only the texture slots that changed this frame (multi-monitor safe):
         // each renderer owns its own atlas, so no shared queue that one monitor drains.
         for (ti, img) in self.texture_slots.iter().enumerate() {
+            if !self.texture_dirty[ti] {
+                continue;
+            }
             if let Some(img) = img {
                 if let Some((ux, uy, uw, uh)) = renderer.upload_texture(ti, &img.rgba, img.w, img.h) {
                     // find the widget slot(s) referencing this texture index
