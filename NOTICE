@@ -1,0 +1,32 @@
+NOTICE
+======
+
+pulse-ring — Wayland 壁纸层音乐律动可视化（GPU 渲染，wgpu/Vulkan）
+
+Copyright (C) MEKCCK
+
+本软件基于 AGPL-3.0-or-later 授权发布，详见 LICENSE 文件。
+
+Acknowledgements / 致谢
+------------------------
+
+pulse-ring 的渲染优化与歌词功能在设计上参考/借鉴了以下开源项目，特此致谢，
+并遵循其各自许可证（均为 AGPL-3.0）：
+
+* Folia — https://github.com/chthollyphile/folia-major
+  歌词管线（LRC 解析、逐字着色、行级高亮）、主题与视觉设计参考。
+  许可证：GNU Affero General Public License v3.0
+
+* SPlayer — https://github.com/SPlayer-Dev/SPlayer
+  网络歌词多源获取、时长匹配校验、歌词元数据/署名行过滤思路。
+  许可证：GNU Affero General Public License v3.0
+
+引用来源均以概念/思路形式再实现于 Rust，未直接复制其源代码。
+pulse-ring 采用 AGPL-3.0-or-later，兼容原 GPL-3.0 条款与上述参考项目的
+AGPL-3.0 条款。
+
+在线歌词数据来源（按优先级）：
+- 本地 `~/.config/pulse-ring/lyrics/` 用户歌词文件
+- 磁盘缓存（在线获取成功自动保存）
+- QQ 音乐公开 Web API（腾讯音乐）
+- Lrclib（https://lrclib.net）
