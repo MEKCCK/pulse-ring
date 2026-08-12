@@ -2,7 +2,7 @@
 name = "pulse-ring"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 smithay-client-toolkit = { version = "0.21", features = ["system"] }

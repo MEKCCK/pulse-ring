@@ -97,7 +97,16 @@ function transformBands(bands) ... end
 
 ## 许可证
 
-GPL-3.0-or-later © MEKCCK，详见 [LICENSE](LICENSE)。
+AGPL-3.0-or-later © MEKCCK，详见 [LICENSE](LICENSE)。
+
+## 致谢 / Acknowledgements
+
+本项目（渲染优化与歌词功能）在设计上参考/借鉴了以下开源项目，特此致谢并遵循其许可证：
+
+- **[Folia](https://github.com/chthollyphile/folia-major)**（AGPL-3.0）—— 歌词管线（LRC 解析、逐字着色、行级高亮）、主题与视觉设计参考
+- **[SPlayer](https://github.com/SPlayer-Dev/SPlayer)**（AGPL-3.0）—— 网络歌词多源获取、时长匹配校验、歌词元数据/署名行过滤思路
+
+pulse-ring 采用 **AGPL-3.0-or-later**（兼容原 GPL-3.0 与所参考项目的 AGPL-3.0 条款）；引用来源均以概念/思路形式再实现于 Rust，未直接复制其代码。
 
 ## 性能 / 帧率
 
