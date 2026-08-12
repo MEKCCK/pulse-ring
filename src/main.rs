@@ -127,6 +127,13 @@ struct App {
     idle_since: Option<f32>,
     max_fps: u32,
     plugin_buf: Vec<u8>,
+    lyric_data: Option<lyrics::LyricData>,
+    lyric_key: String,
+    lyric_tx: std::sync::mpsc::Sender<String>,
+    lyric_rx: std::sync::mpsc::Receiver<(String, Option<lyrics::LyricData>)>,
+    lyric_pos_poll_elapsed: f32,
+    /// Per-widget-slot raster cache for lyric banners: (signature, image).
+    lyric_cache: Vec<Option<(String, ImageData)>>,
 }
 
 fn main() {
@@ -174,6 +181,7 @@ fn main() {
 
     let lua_script = cfg.lua_script.clone();
     let lua_state = lua::LuaState::new(lua_script.as_deref(), &mut cfg);
+    let (lyric_tx, lyric_rx) = spawn_lyric_thread();
     let mut app = App {
         compositor,
         layer_shell,
@@ -219,6 +227,12 @@ fn main() {
             .unwrap_or(30)
             .clamp(15, 60),
         plugin_buf: Vec::new(),
+        lyric_data: None,
+        lyric_key: String::new(),
+        lyric_tx,
+        lyric_rx,
+        lyric_pos_poll_elapsed: 0.0,
+        lyric_cache: vec![None; 32],
     };
 
     // Wait for the first configure (outputs sized) via blocking dispatch, then switch to a
@@ -559,7 +573,7 @@ fn compute_widget_bounds(widgets: &[crate::config::WidgetConfig], width: u32, he
             WidgetType::Ring => (w.base_radius + w.growth + w.halo_size + 0.05) * w.size * min_d,
             WidgetType::Bars => w.size.max(w.bar_height) * min_d * 1.05,
             WidgetType::Clock | WidgetType::Analog => (w.size * 0.5 + w.dial_border) * min_d + min_d * 0.01,
-            WidgetType::Image | WidgetType::Cover => w.size * min_d * 0.75 + (w.border_width + w.cover_growth) * min_d,
+            WidgetType::Image | WidgetType::Cover | WidgetType::Lyric => w.size * min_d * 0.75 + (w.border_width + w.cover_growth) * min_d,
             WidgetType::Plugin => w.size * min_d * 0.75,
         };
         out[i] = b.max(1.0);
@@ -601,6 +615,49 @@ fn now_hmsparts() -> (i32, i32, i32, f32) {
     }
     (tm.tm_hour, tm.tm_min, tm.tm_sec, now.subsec_nanos() as f32 / 1e9)
 }
+
+/// Background lyric fetcher. The App sends a track key (`title\u{1}artist`) when the
+/// track changes; the thread resolves local -> cache -> NetEase and replies with the
+/// parsed lyric data tagged with the same key.
+fn spawn_lyric_thread() -> (
+    std::sync::mpsc::Sender<String>,
+    std::sync::mpsc::Receiver<(String, Option<lyrics::LyricData>)>,
+) {
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<String>();
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<(String, Option<lyrics::LyricData>)>();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cfg_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".config"))
+        .join("pulse-ring")
+        .join("lyrics");
+    let cache_dir = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".cache"))
+        .join("pulse-ring")
+        .join("lyrics");
+    std::thread::spawn(move || {
+        while let Ok(key) = cmd_rx.recv() {
+            let (title, artist) = match key.split_once('\u{1}') {
+                Some((t, a)) => (t, a),
+                None => (key.as_str(), ""),
+            };
+            let data = lyrics::fetch_lyrics(
+                title,
+                artist,
+                &cfg_dir.to_string_lossy(),
+                &cache_dir.to_string_lossy(),
+            )
+            .map(|text| lyrics::parse_lrc(&text));
+            log::info!("lyric: fetched {} for '{}'", if data.is_some() { "ok" } else { "none" }, title);
+            if res_tx.send((key, data)).is_err() {
+                break;
+            }
+        }
+    });
+    (cmd_tx, res_rx)
+}
+
 
 /// Poll the MPRIS cover via `playerctl` every 2s, decode it, send RGBA through a channel.
 fn spawn_cover_thread() -> std::sync::mpsc::Receiver<ImageData> {
@@ -798,6 +855,105 @@ fn rasterize_text(font: &rusttype::Font, text: &str, size_pt: f32, color: [f32; 
     img
 }
 
+/// Compose prev/current/next lyric lines into one RGBA banner. The current line is drawn
+/// in `active` colour; its first `progress` fraction is overpainted in `karaoke` colour
+/// (a smooth per-word highlight like a karaoke bar). Returns None when there is no text.
+fn rasterize_lyric_image(
+    font: &rusttype::Font,
+    prev: Option<&str>,
+    current: &str,
+    next: Option<&str>,
+    progress: f32,
+    font_size: f32,
+    dim: [f32; 4],
+    active: [f32; 4],
+    karaoke: [f32; 4],
+    show_prev_next: bool,
+) -> Option<ImageData> {
+    let current = current.trim();
+    if current.is_empty() {
+        return None;
+    }
+    let sub_scale_f = 0.62;
+    let cur_scale = rusttype::Scale::uniform(font_size);
+    let sub_scale = rusttype::Scale::uniform(font_size * sub_scale_f);
+    let metrics = |sc: rusttype::Scale| {
+        let v = font.v_metrics(sc);
+        ((v.ascent - v.descent).ceil() as u32, v.ascent)
+    };
+    let (cur_h, cur_ascent) = metrics(cur_scale);
+    let (sub_h, sub_ascent) = metrics(sub_scale);
+    let line_w = |text: &str, sc: rusttype::Scale| -> u32 {
+        font.layout(text, sc, rusttype::point(0.0, 0.0))
+            .map(|g| g.unpositioned().h_metrics().advance_width.ceil() as u32)
+            .sum()
+    };
+    let prev_line = if show_prev_next { prev.unwrap_or("").trim() } else { "" };
+    let next_line = if show_prev_next { next.unwrap_or("").trim() } else { "" };
+    let gap = (cur_h as f32 * 0.22).ceil() as u32;
+    let show_prev = !prev_line.is_empty();
+    let show_next = !next_line.is_empty();
+    let sub_lines = (if show_prev { 1 } else { 0 }) + (if show_next { 1 } else { 0 });
+    let w = line_w(current, cur_scale)
+        .max(if show_prev { line_w(prev_line, sub_scale) } else { 0 })
+        .max(if show_next { line_w(next_line, sub_scale) } else { 0 })
+        .max(8);
+    let h = cur_h
+        + if sub_lines > 0 {
+            sub_h * sub_lines as u32 + gap * 2
+        } else {
+            0
+        };
+    let mut img = ImageData {
+        w,
+        h: h.max(4),
+        rgba: vec![0u8; (w * h.max(4) * 4) as usize],
+    };
+    // Vertical layout: [prev] [gap] [current] [gap] [next], current centered.
+    let cur_top = if show_prev { sub_h + gap } else { 0 };
+    let next_top = cur_top + cur_h + gap;
+    // Draw a single line with optional karaoke clip; colours are baked with alpha.
+    let mut draw_line = |text: &str,
+                     sc: rusttype::Scale,
+                     ascent: f32,
+                     top: u32,
+                     color: [f32; 4],
+                     clip: Option<(f32, [f32; 4])>| {
+        let x_off = ((w as i64 - line_w(text, sc) as i64) / 2).max(0) as u32;
+        let glyphs: Vec<rusttype::PositionedGlyph> =
+            font.layout(text, sc, rusttype::point(x_off as f32, ascent + top as f32)).collect();
+        for g in &glyphs {
+            if let Some(bb) = g.pixel_bounding_box() {
+                g.draw(|x, y, cov| {
+                    let px = (bb.min.x as u32).wrapping_add(x);
+                    let py = (bb.min.y as u32).wrapping_add(y);
+                    if px < img.w && py < img.h {
+                        let a = cov;
+                        let (cr, cg, cb, ca) = match clip {
+                            Some((clip_x, kc)) if px as f32 <= clip_x => (kc[0], kc[1], kc[2], kc[3]),
+                            _ => (color[0], color[1], color[2], color[3]),
+                        };
+                        let o = ((py * img.w + px) * 4) as usize;
+                        img.rgba[o] = (cr * 255.0 * a * ca) as u8;
+                        img.rgba[o + 1] = (cg * 255.0 * a * ca) as u8;
+                        img.rgba[o + 2] = (cb * 255.0 * a * ca) as u8;
+                        img.rgba[o + 3] = (a * ca * 255.0) as u8;
+                    }
+                });
+            }
+        }
+    };
+    if show_prev {
+        draw_line(prev_line, sub_scale, sub_ascent, 0, dim, None);
+    }
+    let clip_x = progress.clamp(0.0, 1.0) * w as f32;
+    draw_line(current, cur_scale, cur_ascent, cur_top, active, Some((clip_x, karaoke)));
+    if show_next {
+        draw_line(next_line, sub_scale, sub_ascent, next_top, dim, None);
+    }
+    Some(img)
+}
+
 impl App {
     /// Compute widget uniform data (12 f32 each). Returns the 96-float layout.
     /// `widgets` is the per-frame snapshot taken once in compute_scene.
@@ -817,6 +973,7 @@ impl App {
                 WidgetType::Cover => 4.0,
                 WidgetType::Analog => 5.0,
                 WidgetType::Plugin => 6.0,
+                WidgetType::Lyric => 1.0, // textured quad, like Image
             };
             data[o + 1] = w.x;
             data[o + 2] = w.y;
@@ -974,6 +1131,62 @@ impl App {
                     }
                     data[o + 6] = ti as f32;
                 }
+                WidgetType::Lyric => {
+                    // Current song lyric banner: prev/current/next lines with karaoke
+                    // progress baked into the rasterised texture (Image quad path).
+                    let Some(lt) = self.lyric_time() else { continue };
+                    let Some(ldata) = &self.lyric_data else { continue };
+                    let Some(ls) = lyrics::line_state(ldata, lt) else { continue };
+                    let cur = &ldata.lines[ls.index].text;
+                    let prev = if w.show_prev_next && ls.index > 0 {
+                        Some(ldata.lines[ls.index - 1].text.as_str())
+                    } else {
+                        None
+                    };
+                    let next = if w.show_prev_next {
+                        ldata.lines.get(ls.index + 1).map(|l| l.text.as_str())
+                    } else {
+                        None
+                    };
+                    // 10 progress buckets per line keep re-rasterisation cheap.
+                    let bucket = (ls.progress * 10.0).floor() / 10.0;
+                    let dim = [w.color[0] * 0.55, w.color[1] * 0.55, w.color[2] * 0.55, w.color[3] * 0.6];
+                    let active = w.colors.first().copied().unwrap_or([0.85, 0.9, 1.0, 1.0]);
+                    let karaoke = w.colors.get(1).copied().unwrap_or([1.0, 0.78, 0.35, 1.0]);
+                    let sig = format!(
+                        "{slot}|{}|{}|{}|{}|{bucket:.1}|{}|{}",
+                        self.lyric_key,
+                        prev.unwrap_or(""),
+                        cur,
+                        next.unwrap_or(""),
+                        w.font_size,
+                        w.show_prev_next
+                    );
+                    let rendered: Option<ImageData> = match &mut self.lyric_cache[slot] {
+                        Some((cs, im)) if *cs == sig => Some(im.clone()),
+                        cached => {
+                            match rasterize_lyric_image(
+                                &self.font, prev, cur, next, bucket, w.font_size,
+                                dim, active, karaoke, w.show_prev_next,
+                            ) {
+                                Some(im2) => {
+                                    *cached = Some((sig, im2.clone()));
+                                    Some(im2)
+                                }
+                                None => None,
+                            }
+                        }
+                    };
+                    if let Some(img) = rendered {
+                        let (iw, ih) = (img.w as f32, img.h as f32);
+                        data[o + 6] = tex_index as f32;
+                        data[o + 11] = ih / iw; // aspect
+                        self.texture_slots[tex_index as usize] = Some(img);
+                        tex_index += 1;
+                    } else {
+                        continue;
+                    }
+                }
             }
         }
         data
@@ -994,26 +1207,59 @@ impl App {
 
     /// Refresh MPRIS music info (throttled by the cover thread cadence: cheap anyway).
     fn poll_music(&mut self) {
-        let out = std::process::Command::new("playerctl")
-            .args(["metadata", "xesam:title"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        if let Some(t) = out {
-            if self.music.title != t {
-                self.music.title = t;
+        let run = |args: &[&str]| -> Option<String> {
+            std::process::Command::new("playerctl")
+                .args(args)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let title = run(&["metadata", "xesam:title"]);
+        let artist = run(&["metadata", "xesam:artist"]);
+        let pos_us = run(&["position"]).and_then(|s| s.parse::<u64>().ok());
+        let status = run(&["status"]);
+        if let Some(t) = title {
+            let changed = self.music.title != t;
+            if changed {
+                // Track changed: ask the background thread for new lyrics.
+                let key = format!("{}\u{1}{}", t, artist.as_deref().unwrap_or(""));
+                self.lyric_key = key.clone();
+                self.lyric_data = None;
+                let _ = self.lyric_tx.send(key);
             }
+            self.music.title = t;
         }
-        let out = std::process::Command::new("playerctl")
-            .args(["metadata", "xesam:artist"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        if let Some(a) = out {
+        if let Some(a) = artist {
             self.music.artist = a;
         }
+        if let Some(us) = pos_us {
+            self.music.position_sec = us as f32 / 1_000_000.0;
+            self.lyric_pos_poll_elapsed = self.start.elapsed().as_secs_f32();
+        }
+        self.music.playing = status.as_deref() == Some("Playing");
+        // Drain lyric fetch results; only accept the one matching the current track.
+        while let Ok((key, data)) = self.lyric_rx.try_recv() {
+            if key == self.lyric_key {
+                self.lyric_data = data;
+                log::info!("lyric: loaded {} lines", self.lyric_data.as_ref().map_or(0, |d| d.lines.len()));
+            }
+        }
+    }
+
+    /// Current lyric playback time: MPRIS position advanced by elapsed wall time while playing.
+    fn lyric_time(&self) -> Option<f32> {
+        if self.lyric_data.is_none() {
+            return None;
+        }
+        let t = if self.music.playing {
+            let dt = (self.start.elapsed().as_secs_f32() - self.lyric_pos_poll_elapsed).max(0.0);
+            self.music.position_sec + dt
+        } else {
+            self.music.position_sec
+        };
+        Some(t)
     }
 
     /// Ask each plugin to render its RGBA texture, then store into texture_slots for
@@ -1355,6 +1601,25 @@ PulseRing {
         for w in &cfg.widgets {
             println!("widget: {:?} x={} y={} size={} alpha={}", w.widget_type, w.x, w.y, w.size, w.alpha);
         }
+    }
+
+    #[test]
+    fn parse_lyric_widget_works() {
+        use crate::config::WidgetType;
+        let qml = r##"
+PulseRing {
+    widgets: [
+        Widget { type: "lyric"; x: 0.5; y: 0.82; size: 0.7; fontSize: 44; showPrevNext: false; colors: ["#EADDFF", "#FFD740"] }
+    ]
+}
+"##;
+        let cfg = parse_for_test(qml);
+        assert_eq!(cfg.widgets.len(), 1);
+        let w = &cfg.widgets[0];
+        assert_eq!(w.widget_type, WidgetType::Lyric);
+        assert_eq!(w.font_size, 44.0);
+        assert!(!w.show_prev_next);
+        assert_eq!(w.colors.len(), 2);
     }
 
     #[test]
