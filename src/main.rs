@@ -652,6 +652,8 @@ struct MusicSnapshot {
     title: String,
     artist: String,
     position_sec: f32,
+    /// Track duration in seconds (mpris:length), used to validate lyric matches.
+    duration_sec: f32,
     playing: bool,
 }
 
@@ -682,6 +684,11 @@ fn spawn_music_thread() -> std::sync::mpsc::Receiver<MusicSnapshot> {
                         Some(if v.abs() > 100_000.0 { v / 1_000_000.0 } else { v })
                     })
                     .unwrap_or(0.0) as f32,
+                // mpris:length is in microseconds.
+                duration_sec: run(&["metadata", "mpris:length"])
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|v| (v / 1_000_000.0) as f32)
+                    .unwrap_or(0.0),
                 playing: run(&["status"]).as_deref() == Some("Playing"),
             };
             if tx.send(snap).is_err() {
@@ -693,9 +700,9 @@ fn spawn_music_thread() -> std::sync::mpsc::Receiver<MusicSnapshot> {
     rx
 }
 
-/// Background lyric fetcher. The App sends a track key (`title\u{1}artist`) when the
-/// track changes; the thread resolves local -> cache -> NetEase and replies with the
-/// parsed lyric data tagged with the same key.
+/// Background lyric fetcher. The App sends a track key (`title\u{1}artist\u{1}duration_sec`)
+/// when the track changes; the thread resolves local -> cache -> QQ -> Lrclib and
+/// replies with the parsed lyric data tagged with the same key.
 fn spawn_lyric_thread() -> (
     std::sync::mpsc::Sender<String>,
     std::sync::mpsc::Receiver<(String, Option<lyrics::LyricData>)>,
@@ -715,15 +722,16 @@ fn spawn_lyric_thread() -> (
         .join("lyrics");
     std::thread::spawn(move || {
         while let Ok(key) = cmd_rx.recv() {
-            let (title, artist) = match key.split_once('\u{1}') {
-                Some((t, a)) => (t, a),
-                None => (key.as_str(), ""),
-            };
+            let mut parts = key.split('\u{1}');
+            let title = parts.next().unwrap_or("");
+            let artist = parts.next().unwrap_or("");
+            let duration_hint = parts.next().and_then(|d| d.parse::<f32>().ok()).filter(|d| *d > 0.0);
             let data = lyrics::fetch_lyrics(
                 title,
                 artist,
                 &cfg_dir.to_string_lossy(),
                 &cache_dir.to_string_lossy(),
+                duration_hint,
             )
             .map(|text| lyrics::parse_lrc(&text));
             log::info!("lyric: fetched {} for '{}'", if data.is_some() { "ok" } else { "none" }, title);
@@ -1588,7 +1596,7 @@ impl App {
                     .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".cache"))
                     .join("pulse-ring")
                     .join("lyrics");
-                let key = format!("{}\u{1}{}", t, artist.as_deref().unwrap_or(""));
+                let key = format!("{}\u{1}{}\u{1}{:.1}", t, artist.as_deref().unwrap_or(""), snap.duration_sec);
                 self.lyric_key = key.clone();
                 // Reset the monotonic lyric clock for the new track.
                 self.lyric_t_prev = -1000.0;

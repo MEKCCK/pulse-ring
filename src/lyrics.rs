@@ -76,12 +76,33 @@ pub fn parse_lrc(text: &str) -> LyricData {
         if times.is_empty() {
             continue;
         }
+        // Drop noisy credit/attribution lines (QQ Music LRCs carry them as timed
+        // lines: "词：周杰伦", "曲：…", "编曲：…", etc.) — they are metadata, not
+        // singable lyrics.
+        if is_credit_line(content) {
+            continue;
+        }
         // Enhanced LRC: inline <mm:ss.xx> word timestamps.
         let (plain, words) = parse_enhanced(content);
         for &t in &times {
             raw.push((t, plain.clone(), words.clone()));
         }
     }
+
+/// True when a lyric line is a composer/credits attribution (not singable text).
+fn is_credit_line(text: &str) -> bool {
+    const CREDIT_PREFIXES: [&str; 24] = [
+        "词：", "曲：", "词:", "曲:", "编曲", "制作人", "合声", "和声", "吉他", "贝斯",
+        "鼓", "钢琴", "键盘", "弦乐", "管乐", "监制", "录音", "混音", "母带",
+        "企划", "统筹", "发行", "出品", "配唱",
+    ];
+    let t = text.trim();
+    // QQ credit lines are short and start with a credit keyword.
+    t.chars().count() <= 40
+        && CREDIT_PREFIXES
+            .iter()
+            .any(|p| t.starts_with(p) || t.contains(&format!("：{}", p.trim_end_matches('：'))))
+}
 
     raw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let lines = raw
@@ -223,6 +244,91 @@ pub fn load_local(dir: &str, title: &str, artist: &str) -> Option<String> {
     None
 }
 
+/// Fetch lyrics from Tencent QQ Music's public web API (no auth). Searches by
+/// `title + artist`, validates the candidate against `duration_hint` (seconds) when
+/// known — SPlayer-style guard against matching the wrong song — then downloads the
+/// LRC. Blocking — call from a background thread.
+pub fn fetch_qq(
+    title: &str,
+    artist: &str,
+    duration_hint: Option<f32>,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let keyword = format!("{} {}", title.trim(), artist.trim());
+    if keyword.trim().is_empty() {
+        return None;
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .build();
+    let referer = "https://y.qq.com/";
+    let search_url = format!(
+        "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w={}&format=json&n=5",
+        urlencode(&keyword)
+    );
+    let resp = agent.get(&search_url).set("Referer", referer).call().ok()?;
+    let body = resp.into_string().ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let list = v.pointer("/data/song/list")?.as_array()?;
+    if list.is_empty() {
+        return None;
+    }
+    // Pick the best candidate: duration match (if a hint is available) beats order,
+    // so a wrong-length re-record from another album never wins over the right one.
+    let title_l = title.trim().to_lowercase();
+    let mut best: Option<(f32, usize)> = None; // (score, index); lower is better
+    let mut any_dur_ok = false;
+    for (i, s) in list.iter().enumerate() {
+        let name = s.get("songname").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
+        let interval = s.get("interval").and_then(|x| x.as_u64()).unwrap_or(0) as f32;
+        let name_ok = name.contains(&title_l) || title_l.contains(&name.trim_end());
+        let dur_ok = duration_hint
+            .map(|hint| (interval - hint).abs() < 8.0)
+            .unwrap_or(true);
+        if dur_ok {
+            any_dur_ok = true;
+        }
+        let score = if dur_ok && name_ok {
+            0.0
+        } else if dur_ok {
+            1.0
+        } else if name_ok {
+            2.0
+        } else {
+            3.0
+        };
+        if best.map(|(bs, _)| score < bs).unwrap_or(true) {
+            best = Some((score, i));
+        }
+    }
+    // When the real duration is known, only accept a duration-plausible match — a
+    // name-only hit can be a wrong version/cover, which lrclib would handle better.
+    if duration_hint.is_some() && !any_dur_ok {
+        return None;
+    }
+    let idx = best?.1;
+    let song = &list[idx];
+    let mid = song
+        .get("songmid")
+        .or_else(|| song.get("media_mid"))
+        .and_then(|x| x.as_str())?;
+    if mid.is_empty() {
+        return None;
+    }
+    let lyric_url = format!(
+        "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={mid}&format=json&nobase64=1"
+    );
+    let resp = agent.get(&lyric_url).set("Referer", referer).call().ok()?;
+    let body = resp.into_string().ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let lrc = v.get("lyric").and_then(|x| x.as_str())?;
+    if lrc.trim().is_empty() {
+        return None;
+    }
+    Some(lrc.to_string())
+}
+
 /// Fetch synced lyrics for `(title, artist)` from Lrclib (https://lrclib.net),
 /// a free open lyrics API returning LRC files. Blocking — call from a background thread.
 pub fn fetch_online(title: &str, artist: &str, timeout: std::time::Duration) -> Option<String> {
@@ -266,13 +372,14 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// Full fetch pipeline: local `~/.config/pulse-ring/lyrics/` first, then cache, then online.
-/// Returns the raw LRC text. Blocking — call from a background thread.
+/// Full fetch pipeline: local `~/.config/pulse-ring/lyrics/` first, then cache, then
+/// QQ Music, then Lrclib. The winner is cached to disk. Blocking — background thread.
 pub fn fetch_lyrics(
     title: &str,
     artist: &str,
     cfg_dir: &str,
     cache_dir: &str,
+    duration_hint: Option<f32>,
 ) -> Option<String> {
     if title.trim().is_empty() {
         return None;
@@ -280,7 +387,9 @@ pub fn fetch_lyrics(
     if let Some(s) = fetch_local_or_cache(title, artist, cfg_dir, cache_dir) {
         return Some(s);
     }
-    let fetched = fetch_online(title, artist, std::time::Duration::from_secs(3))?;
+    let timeout = std::time::Duration::from_secs(3);
+    let fetched = fetch_qq(title, artist, duration_hint, timeout)
+        .or_else(|| fetch_online(title, artist, timeout))?;
     let _ = std::fs::create_dir_all(cache_dir);
     let _ = std::fs::write(&cache_path(title, artist, cache_dir), &fetched);
     Some(fetched)
@@ -402,4 +511,23 @@ mod tests {
         let s = s.expect("lrclib should return lyrics");
         assert!(s.contains("["), "should be LRC text: {}", &s[..s.len().min(80)]);
     }
+
+    #[test]
+    #[ignore = "network"]
+    fn qq_fetch_returns_lrc() {
+        let lrc = fetch_qq("晴天", "周杰伦", Some(269.0), std::time::Duration::from_secs(10));
+        let lrc = lrc.expect("QQ should return lyrics");
+        assert!(lrc.contains("[00:"), "should be LRC: {}", &lrc[..lrc.len().min(80)]);
+        // duration validation: wrong-length song should be rejected (falls through to lrclib)
+        let wrong = fetch_qq("晴天", "周杰伦", Some(30.0), std::time::Duration::from_secs(10));
+        assert!(wrong.is_none(), "wrong-duration match should be rejected");
+    }
+
+    #[test]
+    fn credit_lines_are_filtered() {
+        let d = parse_lrc("[00:01.00]词：周杰伦\n[00:02.00]曲：周杰伦\n[00:03.00]编曲：钟兴民\n[00:04.00]这是真的歌词内容\n");
+        assert_eq!(d.lines.len(), 1, "credit lines should be dropped");
+        assert_eq!(d.lines[0].text, "这是真的歌词内容");
+    }
 }
+
