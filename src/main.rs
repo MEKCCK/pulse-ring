@@ -1418,21 +1418,31 @@ impl App {
                     let Some(lt) = self.lyric_time() else { continue };
                     let Some(ldata) = &self.lyric_data else { continue };
                     let Some(ls) = lyrics::line_state(ldata, lt + w.lyric_offset) else { continue };
-                    // Instrumental gap: the current line is an empty timed marker —
-                    // hide the whole rail (nothing to show) until the next real line.
-                    if ldata.lines[ls.index].text.trim().is_empty() {
-                        continue;
+                    // Instrumental gap (empty timed line): HOLD the last real line as the
+                    // current one until the next section starts — the standard lyric-app
+                    // behaviour. Only when there is no previous line at all (gap before
+                    // the first lyric) is the rail hidden.
+                    let mut idx = ls.index;
+                    if ldata.lines[idx].text.trim().is_empty() {
+                        match lyrics::prev_real_line(&ldata.lines, idx) {
+                            Some(p) => idx = p,
+                            None => {
+                                // Gap before any lyric: hide the widget cleanly.
+                                data[o + 4] = 0.0;
+                                continue;
+                            }
+                        }
                     }
-                    let cur = &ldata.lines[ls.index].text;
+                    let cur = &ldata.lines[idx].text;
                     // Prev/next are the nearest REAL lines (skip empty instrumental gaps).
                     let prev = if w.show_prev_next {
-                        lyrics::prev_real_line(&ldata.lines, ls.index)
+                        lyrics::prev_real_line(&ldata.lines, idx)
                             .map(|i| ldata.lines[i].text.as_str())
                     } else {
                         None
                     };
                     let next = if w.show_prev_next {
-                        lyrics::next_real_line(&ldata.lines, ls.index)
+                        lyrics::next_real_line(&ldata.lines, idx)
                             .map(|i| ldata.lines[i].text.as_str())
                     } else {
                         None
