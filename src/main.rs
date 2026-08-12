@@ -125,6 +125,7 @@ struct App {
     interval: std::time::Duration,
     idle_since: Option<f32>,
     max_fps: u32,
+    plugin_buf: Vec<u8>,
 }
 
 fn main() {
@@ -216,6 +217,7 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(30)
             .clamp(15, 60),
+        plugin_buf: Vec::new(),
     };
 
     // Wait for the first configure (outputs sized) via blocking dispatch, then switch to a
@@ -1023,14 +1025,17 @@ impl App {
             .first()
             .map(|o| (o.width, o.height))
             .unwrap_or((1920, 1080));
+        // Reuse one persistent buffer across frames (plugins are called every frame;
+        // reallocating 1MB per frame per plugin is pure waste).
+        if self.plugin_buf.len() < 512 * 512 * 4 {
+            self.plugin_buf.resize(512 * 512 * 4, 0);
+        }
         for (i, p) in self.plugins.iter().enumerate() {
             let slot = (8 + i) as u32;
-            // allocate a 512x512 buffer per plugin (host-owned)
-            let mut buf = vec![0u8; 512 * 512 * 4];
             let mut req = plugin::RenderRequest {
                 slot,
-                buf_len: buf.len(),
-                buf: buf.as_mut_ptr(),
+                buf_len: self.plugin_buf.len(),
+                buf: self.plugin_buf.as_mut_ptr(),
                 update: false,
                 width: 0,
                 height: 0,
@@ -1039,19 +1044,21 @@ impl App {
             };
             p.bind_state(&self.bands, &self.cfg as *const crate::config::Config);
             p.call_render(&mut req);
-            if req.update && req.width > 0 && req.height > 0 {
-                let w = req.width.min(512);
-                let h = req.height.min(512);
-                // Plugin writes a w×h image at the start of the buffer with row stride = w.
-                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-                for y in 0..h {
-                    for x in 0..w {
-                        let si = ((y * w + x) * 4) as usize;
-                        rgba.extend_from_slice(&buf[si..si + 4]);
-                    }
-                }
-                self.plugin_tex[i] = Some((w, h, rgba));
+            if !req.update || req.width == 0 || req.height == 0 {
+                // Keep the previous texture (if any); nothing new to upload.
+                continue;
             }
+            let w = req.width.min(512);
+            let h = req.height.min(512);
+            // Plugin writes a w×h image at the start of the buffer with row stride = w.
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let si = ((y * w + x) * 4) as usize;
+                    rgba.extend_from_slice(&self.plugin_buf[si..si + 4]);
+                }
+            }
+            self.plugin_tex[i] = Some((w, h, rgba));
         }
         // write plugin textures into texture_slots (so prepare_widgets picks them up)
         for (i, tex) in self.plugin_tex.iter().enumerate() {
