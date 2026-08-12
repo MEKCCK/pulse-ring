@@ -188,18 +188,31 @@ fn sanitize(s: &str) -> String {
 
 /// Try to load a local `.lrc` for `(title, artist)` from `dir`.
 /// Candidate names: `<title>.lrc`, `<artist> - <title>.lrc`, `<artist>-<title>.lrc`.
+/// Both the raw title/artist and the filesystem-sanitized forms are tried, so
+/// files named naturally (with spaces) and by the cache convention both match.
 pub fn load_local(dir: &str, title: &str, artist: &str) -> Option<String> {
     let title = title.trim();
     if title.is_empty() {
         return None;
     }
-    let mut candidates = vec![format!("{title}.lrc")];
-    if !artist.trim().is_empty() {
-        candidates.push(format!("{} - {}.lrc", artist.trim(), title));
-        candidates.push(format!("{}-{}.lrc", artist.trim(), title));
+    let artist = artist.trim();
+    let mut names = vec![format!("{title}.lrc")];
+    for base in [title.to_string(), sanitize(title)] {
+        for a in [artist.to_string(), sanitize(artist)] {
+            if !a.is_empty() {
+                names.push(format!("{a} - {base}.lrc"));
+                names.push(format!("{a}-{base}.lrc"));
+            }
+        }
+        names.push(format!("{base}.lrc"));
     }
-    for c in candidates {
-        let p = format!("{dir}/{c}");
+    // De-duplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    for n in names {
+        if !seen.insert(n.clone()) {
+            continue;
+        }
+        let p = format!("{dir}/{n}");
         if let Ok(s) = std::fs::read_to_string(&p) {
             return Some(s);
         }

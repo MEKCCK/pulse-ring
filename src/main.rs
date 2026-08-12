@@ -1178,6 +1178,8 @@ impl App {
                         }
                     };
                     if let Some(img) = rendered {
+                        // Atlas slots are 512px max — scale the banner down to fit.
+                        let img = fit_slot(img);
                         let (iw, ih) = (img.w as f32, img.h as f32);
                         data[o + 6] = tex_index as f32;
                         data[o + 11] = ih / iw; // aspect
@@ -1674,4 +1676,46 @@ PulseRing {
         assert_eq!(frame_interval_ms(0.01, 30), 33); // active 30fps
         assert_eq!(frame_interval_ms(0.01, 60), 16); // active 60fps
     }
+
+    #[test]
+    fn lyric_raster_has_karaoke_clip() {
+        use crate::{load_font, rasterize_lyric_image};
+        let font = load_font();
+        let img = rasterize_lyric_image(
+            &font,
+            None,
+            "hello world",
+            None,
+            0.5,
+            40.0,
+            [0.5, 0.5, 0.6, 0.6],
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 0.5, 0.0, 1.0],
+            false,
+        )
+        .expect("rasterize");
+        assert!(img.w > 10 && img.h > 4);
+        // Scan the row at the text's vertical centre for both active and karaoke colours.
+        let mid = img.h / 2;
+        let mut found_active = false;
+        let mut found_karaoke = false;
+        for x in 0..img.w {
+            let o = ((mid * img.w + x) * 4) as usize;
+            let (r, g, b, a) = (img.rgba[o], img.rgba[o + 1], img.rgba[o + 2], img.rgba[o + 3]);
+            if a > 40 {
+                // karaoke colour is orange (r high, g mid, b low)
+                if r > 180 && g < 160 && b < 80 {
+                    found_karaoke = true;
+                }
+                // active colour is white-ish
+                if r > 180 && g > 180 && b > 180 {
+                    found_active = true;
+                }
+            }
+        }
+        assert!(found_active, "no active-colour pixels");
+        assert!(found_karaoke, "no karaoke-colour pixels (clip missing)");
+    }
+
 }
+
