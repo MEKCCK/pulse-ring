@@ -1416,7 +1416,6 @@ impl App {
                     let ease = tt * tt * (3.0 - 2.0 * tt);
                     let alpha = 0.35 + 0.65 * ease;
                     let y_off = (1.0 - ease) * -24.0;
-                    let t_bucket = (tt * 10.0).floor() / 10.0;
                     let cur = &ldata.lines[ls.index].text;
                     let prev = if w.show_prev_next && ls.index > 0 {
                         Some(ldata.lines[ls.index - 1].text.as_str())
@@ -1430,7 +1429,6 @@ impl App {
                     };
                     let words = &ldata.lines[ls.index].words;
                     let word_idx = ls.word.min(words.len().saturating_sub(1));
-                    let p_bucket = (ls.progress * 20.0).floor() / 20.0;
                     // Colours: colors[0]=base(未唱/上下行) colors[1]=已唱 colors[2]=当前字 colors[3]=辉光
                     let style = LyricStyle {
                         font_size: w.font_size,
@@ -1440,16 +1438,19 @@ impl App {
                         glow: w.colors.get(3).copied().unwrap_or([0.7, 0.53, 1.0, 0.75]),
                         show_prev_next: w.show_prev_next,
                     };
+                    // Full-precision progress in the signature: the karaoke bar advances
+                    // every frame (rasterised on the worker thread) instead of jumping
+                    // in coarse buckets, so the lit portion glides smoothly.
                     let sig = format!(
-                        "{slot}|{}|{}|{}|{}|{}|{}|{:.2}|{:.1}|{}|{}|{:.2}",
+                        "{slot}|{}|{}|{}|{}|{}|{}|{:.4}|{:.3}|{}|{}|{:.3}",
                         self.lyric_key,
                         cur,
                         prev.unwrap_or(""),
                         next.unwrap_or(""),
                         word_idx,
                         words.len(),
-                        p_bucket,
-                        t_bucket,
+                        ls.progress,
+                        tt,
                         w.font_size,
                         w.show_prev_next,
                         alpha,
