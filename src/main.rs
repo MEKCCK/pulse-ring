@@ -122,6 +122,9 @@ struct App {
     profile: ProfileStats,
     profile_enabled: bool,
     profile_frames: u32,
+    interval: std::time::Duration,
+    idle_since: Option<f32>,
+    max_fps: u32,
 }
 
 fn main() {
@@ -206,11 +209,18 @@ fn main() {
         profile: ProfileStats::default(),
         profile_enabled: std::env::var("PULSE_RING_PROFILE").is_ok(),
         profile_frames: 0,
+        interval: std::time::Duration::from_millis(33),
+        idle_since: None,
+        max_fps: std::env::var("PULSE_RING_MAX_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30)
+            .clamp(15, 60),
     };
 
     // Wait for the first configure (outputs sized) via blocking dispatch, then switch to a
-    // timed render loop (~30 fps) so the compositor only recomposites on our updates.
-    let interval = std::time::Duration::from_millis(33);
+    // timed render loop (adaptive ~30fps active / 5fps idle) so the compositor only
+    // recomposites on our updates.
     while !app.outputs.iter().any(|o| o.width > 0) {
         event_queue.blocking_dispatch(&mut app).unwrap();
         if !app.outputs.is_empty() && app.outputs.iter().all(|o| o.closed) {
@@ -225,6 +235,7 @@ fn main() {
             break;
         }
         let elapsed = before.elapsed();
+        let interval = app.interval;
         if elapsed < interval {
             std::thread::sleep(interval - elapsed);
         }
@@ -551,6 +562,17 @@ fn compute_widget_bounds(widgets: &[crate::config::WidgetConfig], width: u32, he
         out[i] = b.max(1.0);
     }
     out
+}
+
+/// Frame interval in ms: idle (no audio) -> 5fps; active -> 30fps, or 60fps when opted in.
+fn frame_interval_ms(energy_max: f32, max_fps: u32) -> u64 {
+    if energy_max < 0.002 {
+        200
+    } else if max_fps >= 60 {
+        16
+    } else {
+        33
+    }
 }
 
 fn vec2_angle(a: f32) -> (f32, f32) {
@@ -1046,6 +1068,20 @@ impl App {
         let t0 = std::time::Instant::now();
         self.pull_audio();
         self.profile_mark("pull_audio", t0);
+        // Adaptive frame rate: idle (quiet for 2s) drops to 5fps; audio resumes instantly.
+        let energy_max = self.bands.iter().copied().fold(0.0f32, f32::max);
+        let idle = energy_max < 0.002;
+        let now = self.start.elapsed().as_secs_f32();
+        self.idle_since = if idle {
+            Some(self.idle_since.unwrap_or(now))
+        } else {
+            None
+        };
+        let is_idle = self.idle_since.map(|t| now - t > 2.0).unwrap_or(false);
+        self.interval = std::time::Duration::from_millis(frame_interval_ms(
+            if is_idle { 0.0 } else { energy_max },
+            self.max_fps,
+        ));
         let scene = self.compute_scene();
         let target = self.cfg.render_screen;
         if target >= 0 {
@@ -1355,5 +1391,14 @@ PulseRing {
         // min_d = 1080; bound = (0.13+0.2+0.12+0.05)*0.2*1080 = 108
         assert!((b[0] - 108.0).abs() < 1.0, "b[0]={}", b[0]);
         assert!(b[1..].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn frame_interval_adapts_to_energy() {
+        use super::frame_interval_ms;
+        assert_eq!(frame_interval_ms(0.0, 30), 200); // idle -> 5fps
+        assert_eq!(frame_interval_ms(0.001, 30), 200); // below threshold -> idle
+        assert_eq!(frame_interval_ms(0.01, 30), 33); // active 30fps
+        assert_eq!(frame_interval_ms(0.01, 60), 16); // active 60fps
     }
 }
