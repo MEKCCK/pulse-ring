@@ -25,6 +25,7 @@ mod audio;
 mod config;
 mod draw;
 mod lua;
+mod lyrics;
 mod plugin;
 use audio::NBANDS;
 use draw::RingRenderer;
