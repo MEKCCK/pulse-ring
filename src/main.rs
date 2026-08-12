@@ -151,6 +151,8 @@ struct App {
     /// Line-change transition state.
     lyric_cur_idx: i32,
     lyric_line_changed_at: f32,
+    /// Last lyric clock value (monotonic clamp against MPRIS poll snap-backs).
+    lyric_t_prev: f32,
 }
 
 fn main() {
@@ -263,6 +265,7 @@ fn main() {
         lyric_raster_pending: Vec::new(),
         lyric_cur_idx: -1,
         lyric_line_changed_at: 0.0,
+        lyric_t_prev: -1000.0,
     };
 
     // Wait for the first configure (outputs sized) via blocking dispatch, then switch to a
@@ -1192,7 +1195,9 @@ fn rasterize_lyric_image(
         // Karaoke "dim-to-lit": the full line stays dim, the already-sung portion
         // lights up with a flowing gradient and a glow halo as progress advances.
         blit_text(&mut img, font, current, cur_scale, base_x, baseline, dim_color(st.base), alpha, None);
-        let lit_w = progress.clamp(0.0, 1.0) * cur_w as f32;
+        // A tiny minimum lit width keeps the bar visible (and growing) from the very
+        // first moment of a line instead of appearing from nothing.
+        let lit_w = progress.clamp(0.02, 1.0) * cur_w as f32;
         let clip_x = base_x + lit_w;
         if lit_w > 1.0 {
             if st.glow[3] > 0.004 {
@@ -1407,15 +1412,18 @@ impl App {
                     let Some(ldata) = &self.lyric_data else { continue };
                     let Some(ls) = lyrics::line_state(ldata, lt + w.lyric_offset) else { continue };
                     let elapsed = self.start.elapsed().as_secs_f32();
-                    // Line-change transition: fade in + slide up over 0.25s.
+                    // Line-change transition: the banner scrolls up into place over 0.3s.
+                    // No alpha fade — fading reads as a flicker; a pure slide reads as
+                    // intentional scrolling. Only forward moves animate; going backward
+                    // (seek/poll correction) snaps instantly.
                     if ls.index as i32 != self.lyric_cur_idx {
+                        let going_back = (ls.index as i32) < self.lyric_cur_idx;
                         self.lyric_cur_idx = ls.index as i32;
-                        self.lyric_line_changed_at = elapsed;
+                        self.lyric_line_changed_at = if going_back { 0.0 } else { elapsed };
                     }
-                    let tt = ((elapsed - self.lyric_line_changed_at) / 0.25).clamp(0.0, 1.0);
+                    let tt = ((elapsed - self.lyric_line_changed_at) / 0.30).clamp(0.0, 1.0);
                     let ease = tt * tt * (3.0 - 2.0 * tt);
-                    let alpha = 0.35 + 0.65 * ease;
-                    let y_off = (1.0 - ease) * -24.0;
+                    let y_off = (1.0 - ease) * -40.0;
                     let cur = &ldata.lines[ls.index].text;
                     let prev = if w.show_prev_next && ls.index > 0 {
                         Some(ldata.lines[ls.index - 1].text.as_str())
@@ -1442,7 +1450,7 @@ impl App {
                     // every frame (rasterised on the worker thread) instead of jumping
                     // in coarse buckets, so the lit portion glides smoothly.
                     let sig = format!(
-                        "{slot}|{}|{}|{}|{}|{}|{}|{:.4}|{:.3}|{}|{}|{:.3}",
+                        "{slot}|{}|{}|{}|{}|{}|{}|{:.4}|{:.3}|{}|{}",
                         self.lyric_key,
                         cur,
                         prev.unwrap_or(""),
@@ -1453,7 +1461,6 @@ impl App {
                         tt,
                         w.font_size,
                         w.show_prev_next,
-                        alpha,
                     );
                     // Drain finished renders first (results arrive in order; only the
                     // newest request per slot stays in `pending`, so applying is safe).
@@ -1482,7 +1489,7 @@ impl App {
                                 word_idx,
                                 progress: ls.progress,
                                 style,
-                                alpha,
+                                alpha: 1.0,
                                 y_off,
                             };
                             let _ = self.lyric_raster_tx.send((seq, req));
@@ -1562,6 +1569,8 @@ impl App {
                     .join("lyrics");
                 let key = format!("{}\u{1}{}", t, artist.as_deref().unwrap_or(""));
                 self.lyric_key = key.clone();
+                // Reset the monotonic lyric clock for the new track.
+                self.lyric_t_prev = -1000.0;
                 let instant = lyrics::fetch_local_or_cache(
                     &t,
                     artist.as_deref().unwrap_or(""),
@@ -1600,7 +1609,7 @@ impl App {
     }
 
     /// Current lyric playback time: MPRIS position advanced by elapsed wall time while playing.
-    fn lyric_time(&self) -> Option<f32> {
+    fn lyric_time(&mut self) -> Option<f32> {
         if self.lyric_data.is_none() {
             return None;
         }
@@ -1610,7 +1619,12 @@ impl App {
         } else {
             self.music.position_sec
         };
-        Some(t)
+        // Clamp: never run more than 0.25s backward. MPRIS poll corrections can snap
+        // the extrapolated time back a little; without this the karaoke bar visibly
+        // shrinks and the line-change transition can re-trigger (flash).
+        let clamped = t.max(self.lyric_t_prev - 0.25);
+        self.lyric_t_prev = clamped;
+        Some(clamped)
     }
 
     /// Ask each plugin to render its RGBA texture, then store into texture_slots for
