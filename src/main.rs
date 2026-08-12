@@ -1011,6 +1011,76 @@ fn dim_color(c: [f32; 4]) -> [f32; 4] {
     [c[0] * 0.62, c[1] * 0.62, c[2] * 0.62, c[3] * 0.72]
 }
 
+fn mix_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
+}
+
+/// Colour at gradient position t (0..1) across the stops.
+fn gradient_color(stops: &[[f32; 4]], t: f32) -> [f32; 4] {
+    if stops.is_empty() {
+        return [1.0, 1.0, 1.0, 1.0];
+    }
+    if stops.len() == 1 {
+        return stops[0];
+    }
+    let t = t.clamp(0.0, 1.0);
+    let f = t * (stops.len() - 1) as f32;
+    let i = (f.floor() as usize).min(stops.len() - 2);
+    mix_color(stops[i], stops[i + 1], f - i as f32)
+}
+
+/// Draw `text` clipped to `clip_x` with a horizontal gradient across the first
+/// `lit_w` pixels (base_x..base_x+lit_w). Used for the lit (already-sung) karaoke
+/// portion of the current line.
+fn blit_gradient_clipped(
+    img: &mut ImageData,
+    font: &rusttype::Font,
+    text: &str,
+    scale: rusttype::Scale,
+    base_x: f32,
+    baseline_y: f32,
+    stops: &[[f32; 4]],
+    lit_w: f32,
+    clip_x: f32,
+    alpha: f32,
+) {
+    let glyphs: Vec<rusttype::PositionedGlyph> =
+        font.layout(text, scale, rusttype::point(base_x, baseline_y)).collect();
+    for g in &glyphs {
+        if let Some(bb) = g.pixel_bounding_box() {
+            g.draw(|x, y, cov| {
+                let px = (bb.min.x as u32).wrapping_add(x);
+                let py = (bb.min.y as u32).wrapping_add(y);
+                if px as f32 >= clip_x {
+                    return;
+                }
+                if px < img.w && py < img.h {
+                    let t = if lit_w > 0.5 {
+                        ((px as f32 - base_x) / lit_w).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let c = gradient_color(stops, t);
+                    let a = cov * c[3] * alpha;
+                    if a <= 0.004 {
+                        return;
+                    }
+                    let o = ((py * img.w + px) * 4) as usize;
+                    img.rgba[o] = (c[0] * 255.0 * a) as u8;
+                    img.rgba[o + 1] = (c[1] * 255.0 * a) as u8;
+                    img.rgba[o + 2] = (c[2] * 255.0 * a) as u8;
+                    img.rgba[o + 3] = (a * 255.0) as u8;
+                }
+            });
+        }
+    }
+}
+
 /// Rasterize the lyric banner (prev/current/next) with Folia-style karaoke:
 /// the current line colours each word by state — already sung words in `sung`,
 /// the current word in `cur` with a glow halo, unsung words in `base`. Lines without
@@ -1101,15 +1171,38 @@ fn rasterize_lyric_image(
             } else {
                 st.base
             };
-            let glow = if i == word_idx { Some(st.glow) } else { None };
+            // The current word gets a strong halo; already-sung words a softer one.
+            let glow = if i == word_idx {
+                Some(st.glow)
+            } else if i < word_idx {
+                Some([st.glow[0], st.glow[1], st.glow[2], st.glow[3] * 0.5])
+            } else {
+                None
+            };
             blit_word(&mut img, font, wt, cur_scale, wx, baseline, color, glow, alpha);
             wx += line_w(wt, cur_scale) as f32;
         }
     } else {
-        blit_text(&mut img, font, current, cur_scale, base_x, baseline, st.base, alpha, None);
-        // Smooth karaoke: the first `progress` fraction of the line is sung-coloured.
-        let clip_x = base_x + progress.clamp(0.0, 1.0) * cur_w as f32;
-        blit_text(&mut img, font, current, cur_scale, base_x, baseline, st.sung, alpha, Some(clip_x));
+        // Karaoke "dim-to-lit": the full line stays dim, the already-sung portion
+        // lights up with a flowing gradient and a glow halo as progress advances.
+        blit_text(&mut img, font, current, cur_scale, base_x, baseline, dim_color(st.base), alpha, None);
+        let lit_w = progress.clamp(0.0, 1.0) * cur_w as f32;
+        let clip_x = base_x + lit_w;
+        if lit_w > 1.0 {
+            if st.glow[3] > 0.004 {
+                let r = 3.0;
+                for (ox, oy) in [
+                    (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r),
+                    (r * 0.71, r * 0.71), (r * 0.71, -r * 0.71),
+                    (-r * 0.71, r * 0.71), (-r * 0.71, -r * 0.71),
+                ] {
+                    blit_text(&mut img, font, current, cur_scale, base_x + ox, baseline + oy,
+                        st.glow, alpha * 0.4, Some(clip_x));
+                }
+            }
+            let stops = [st.sung, mix_color(st.sung, st.cur, 0.55), st.cur];
+            blit_gradient_clipped(&mut img, font, current, cur_scale, base_x, baseline, &stops, lit_w, clip_x, alpha);
+        }
     }
     if show_next {
         blit_text(&mut img, font, next_line, sub_scale, center_x(next_line, sub_scale),
@@ -1938,26 +2031,27 @@ PulseRing {
         let img = rasterize_lyric_image(&font, None, "hello world", None, &[], 0, 0.5, &st, 1.0, 0.0)
             .expect("rasterize");
         assert!(img.w > 10 && img.h > 4);
-        // Scan the row at the text's vertical centre for both base and karaoke colours.
+        // Scan the row at the text's vertical centre: the lit (sung) half should show
+        // the golden gradient, the unlit half the dimmed base colour.
         let mid = img.h / 2;
-        let mut found_active = false;
+        let mut found_dim = false;
         let mut found_karaoke = false;
         for x in 0..img.w {
             let o = ((mid * img.w + x) * 4) as usize;
             let (r, g, b, a) = (img.rgba[o], img.rgba[o + 1], img.rgba[o + 2], img.rgba[o + 3]);
             if a > 40 {
-                // karaoke colour is orange (r high, g mid, b low)
-                if r > 180 && g < 160 && b < 80 {
+                // karaoke gradient: gold-ish (r high, mid g, low b)
+                if r > 190 && g > 120 && g < 235 && b < 130 {
                     found_karaoke = true;
                 }
-                // base colour is lavender-white
-                if r > 180 && g > 180 && b > 180 {
-                    found_active = true;
+                // unlit dim base: muted lavender (dimmer than the lit part)
+                if r > 110 && r < 190 && b > 140 && g > 110 {
+                    found_dim = true;
                 }
             }
         }
-        assert!(found_active, "no base-colour pixels");
-        assert!(found_karaoke, "no karaoke-colour pixels (clip missing)");
+        assert!(found_dim, "no dim unlit pixels");
+        assert!(found_karaoke, "no lit karaoke pixels (clip missing)");
     }
 
     #[test]
