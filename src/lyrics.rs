@@ -84,6 +84,11 @@ pub fn parse_lrc(text: &str) -> LyricData {
         }
         // Enhanced LRC: inline <mm:ss.xx> word timestamps.
         let (plain, words) = parse_enhanced(content);
+        // Skip empty timed lines (instrumental pauses, "[00:15.72] " etc.) — they
+        // carry nothing to display and would make the prev/next rail drop lines.
+        if plain.trim().is_empty() && words.is_empty() {
+            continue;
+        }
         for &t in &times {
             raw.push((t, plain.clone(), words.clone()));
         }
@@ -528,6 +533,15 @@ mod tests {
         let d = parse_lrc("[00:01.00]词：周杰伦\n[00:02.00]曲：周杰伦\n[00:03.00]编曲：钟兴民\n[00:04.00]这是真的歌词内容\n");
         assert_eq!(d.lines.len(), 1, "credit lines should be dropped");
         assert_eq!(d.lines[0].text, "这是真的歌词内容");
+    }
+
+    #[test]
+    fn empty_timed_lines_are_dropped() {
+        let d = parse_lrc("[00:01.00]第一行\n[00:02.00]   \n[00:03.00] 第二行 \n[00:04.00]\n[00:05.00]第三行\n");
+        assert_eq!(d.lines.len(), 3, "empty timed lines must be filtered");
+        assert_eq!(d.lines[0].text, "第一行");
+        assert_eq!(d.lines[1].text, "第二行");
+        assert_eq!(d.lines[2].text, "第三行");
     }
 }
 
