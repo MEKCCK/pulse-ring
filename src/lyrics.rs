@@ -1,5 +1,5 @@
 //! LRC lyrics: parsing (incl. enhanced word timestamps), timeline lookup,
-//! local-file discovery and online fetch (NetEase Cloud Music).
+//! local-file discovery and online fetch (Lrclib).
 //!
 //! The parsed data powers the `lyric` widget: current/next/previous lines and
 //! per-line karaoke progress.
@@ -207,32 +207,34 @@ pub fn load_local(dir: &str, title: &str, artist: &str) -> Option<String> {
     None
 }
 
-/// Fetch lyrics for `(title, artist)` from NetEase Cloud Music's public web API.
-/// Returns the raw LRC text. Blocking — call from a background thread.
-pub fn fetch_netease(title: &str, artist: &str, timeout: std::time::Duration) -> Option<String> {
-    let query = format!("{title} {artist}").trim().to_string();
-    if query.is_empty() {
+/// Fetch synced lyrics for `(title, artist)` from Lrclib (https://lrclib.net),
+/// a free open lyrics API returning LRC files. Blocking — call from a background thread.
+pub fn fetch_online(title: &str, artist: &str, timeout: std::time::Duration) -> Option<String> {
+    let query = format!("{} {}", title.trim(), artist.trim());
+    if query.trim().is_empty() {
         return None;
     }
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(timeout)
         .timeout_read(timeout)
         .build();
-    let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
     let url = format!(
-        "https://music.163.com/api/search/get/web?s={}&type=1&limit=3",
-        urlencode(&query)
+        "https://lrclib.net/api/search?q={}",
+        urlencode(query.trim())
     );
-    let resp = agent.get(&url).set("User-Agent", ua).call().ok()?;
+    let resp = agent.get(&url).call().ok()?;
     let body = resp.into_string().ok()?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let song = v.pointer("/result/songs/0")?;
-    let id = song.get("id")?.as_u64()?;
-    let lyric_url = format!("https://music.163.com/api/song/lyric?id={id}&lv=1&kv=1&tv=-1");
-    let resp = agent.get(&lyric_url).set("User-Agent", ua).call().ok()?;
-    let body = resp.into_string().ok()?;
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    v.pointer("/lrc/lyric")?.as_str().map(str::to_string)
+    let arr = v.as_array()?;
+    // Prefer the first result with a synced (timestamped) lyric.
+    for entry in arr.iter().take(5) {
+        if let Some(lrc) = entry.get("syncedLyrics").and_then(|s| s.as_str()) {
+            if !lrc.trim().is_empty() {
+                return Some(lrc.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn urlencode(s: &str) -> String {
@@ -248,7 +250,7 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// Full fetch pipeline: local `~/.config/pulse-ring/lyrics/` first, then cache, then NetEase.
+/// Full fetch pipeline: local `~/.config/pulse-ring/lyrics/` first, then cache, then online.
 /// Returns the raw LRC text. Blocking — call from a background thread.
 pub fn fetch_lyrics(
     title: &str,
@@ -268,7 +270,7 @@ pub fn fetch_lyrics(
             return Some(s);
         }
     }
-    let fetched = fetch_netease(title, artist, std::time::Duration::from_secs(6))?;
+    let fetched = fetch_online(title, artist, std::time::Duration::from_secs(6))?;
     let _ = std::fs::create_dir_all(cache_dir);
     let _ = std::fs::write(&cache_path, &fetched);
     Some(fetched)
@@ -355,5 +357,13 @@ mod tests {
         let s = load_local(dir.to_str().unwrap(), "晴天", "周杰伦");
         assert!(s.is_some(), "should find artist - title file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "network"]
+    fn online_fetch_returns_synced_lrc() {
+        let s = fetch_online("晴天", "周杰伦", std::time::Duration::from_secs(10));
+        let s = s.expect("lrclib should return lyrics");
+        assert!(s.contains("["), "should be LRC text: {}", &s[..s.len().min(80)]);
     }
 }
