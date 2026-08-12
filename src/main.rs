@@ -32,6 +32,45 @@ use draw::RingRenderer;
 const MAX_PARTICLES: usize = 96;
 const PARTICLE_STRIDE: usize = 12;
 
+/// Per-frame timing breakdown (seconds). Filled when PULSE_RING_PROFILE=1.
+#[derive(Default, Clone, Copy)]
+pub struct ProfileStats {
+    pub pull_audio: f32,
+    pub lua: f32,
+    pub plugins: f32,
+    pub plugin_tex: f32,
+    pub particles: f32,
+    pub widgets: f32,
+    pub render: f32,
+}
+
+impl ProfileStats {
+    pub fn format_line(s: &Self) -> String {
+        let total = s.pull_audio + s.lua + s.plugins + s.plugin_tex + s.particles + s.widgets + s.render;
+        format!(
+            "[profile] pull_audio={:.1}ms lua={:.1}ms plugins={:.1}ms plugin_tex={:.1}ms particles={:.1}ms widgets={:.1}ms render={:.1}ms total={:.1}ms",
+            s.pull_audio * 1000.0, s.lua * 1000.0, s.plugins * 1000.0, s.plugin_tex * 1000.0,
+            s.particles * 1000.0, s.widgets * 1000.0, s.render * 1000.0, total * 1000.0,
+        )
+    }
+}
+
+/// Per-frame scene state computed ONCE per tick and consumed by every output.
+struct SceneFrame {
+    render_bands: [f32; NBANDS],
+    spawn_scale: f32,
+    spawn_t: f32,
+    spawn_effect: u32,
+    spawn_rot: f32,
+    rotate_rad: f32,
+    amp_avg: f32,
+    particles: [f32; MAX_PARTICLES * PARTICLE_STRIDE],
+    widgets: [f32; 1280],
+    bar_energy: [f32; 64],
+    overall: f32,
+    widgets_cfg: Vec<crate::config::WidgetConfig>,
+}
+
 /// One full rendering instance per output (layer surface + wgpu surface + renderer).
 struct OutputSurfaces {
     output: wl_output::WlOutput,
@@ -80,6 +119,9 @@ struct App {
     music: lua::MusicInfo,
     ring_amp_smooth: f32,
     last_music_poll: f32,
+    profile: ProfileStats,
+    profile_enabled: bool,
+    profile_frames: u32,
 }
 
 fn main() {
@@ -161,6 +203,9 @@ fn main() {
         music: lua::MusicInfo::default(),
         ring_amp_smooth: 0.0,
         last_music_poll: -10.0,
+        profile: ProfileStats::default(),
+        profile_enabled: std::env::var("PULSE_RING_PROFILE").is_ok(),
+        profile_frames: 0,
     };
 
     // Wait for the first configure (outputs sized) via blocking dispatch, then switch to a
@@ -295,7 +340,9 @@ impl LayerShellHandler for App {
             // blank (no buffer) so niri has nothing to composite for them.
             let is_target = self.cfg.render_screen < 0 || self.cfg.render_screen == idx as i32;
             if first && is_target {
-                let _ = qh; self.draw_one(idx);
+                let _ = qh;
+                let scene = self.compute_scene();
+                self.render_output(idx, &scene);
             }
         }
     }
@@ -460,6 +507,31 @@ fn compute_particles(
         out[o + 10] = vy;
     }
     out
+}
+
+/// Precompute 64 bar energies from the render bands (bars widgets look these up).
+fn compute_bar_energy(bands: &[f32; NBANDS]) -> [f32; 64] {
+    let mut out = [0.0f32; 64];
+    let n = bands.len();
+    for bi in 0..64 {
+        let lo = bi * n / 64;
+        let hi = ((bi + 1) * n / 64).max(lo + 1);
+        let mut acc = 0.0f32;
+        for i in lo..hi {
+            acc += bands[i];
+        }
+        out[bi] = acc / (hi - lo) as f32;
+    }
+    out
+}
+
+/// Overall energy: mean of the mid-frequency bands (16..96).
+fn compute_overall_energy(bands: &[f32; NBANDS]) -> f32 {
+    let mut acc = 0.0f32;
+    for i in 16..96 {
+        acc += bands[i];
+    }
+    acc / 80.0
 }
 
 fn vec2_angle(a: f32) -> (f32, f32) {
@@ -684,13 +756,13 @@ fn rasterize_text(font: &rusttype::Font, text: &str, size_pt: f32, color: [f32; 
 
 impl App {
     /// Compute widget uniform data (12 f32 each). Returns the 96-float layout.
-    fn prepare_widgets(&mut self, width: u32, height: u32) -> [f32; 1280] {
+    /// `widgets` is the per-frame snapshot taken once in compute_scene.
+    fn prepare_widgets(&mut self, widgets: &[crate::config::WidgetConfig]) -> [f32; 1280] {
         use crate::config::WidgetType;
         let mut data = [0.0f32; 1280];
         let mut tex_index = 0u32;
         // Reserve slot 3 for the album cover (clocks/images use 0..2).
         self.cover_tex_index = 3;
-        let widgets: Vec<crate::config::WidgetConfig> = self.cfg.widgets.iter().take(32).cloned().collect();
         for (slot, w) in widgets.iter().enumerate() {
             let o = slot * 40;
             data[o] = match w.widget_type {
@@ -860,8 +932,6 @@ impl App {
                 }
             }
         }
-        for (si, w) in widgets.iter().enumerate() {
-        }
         data
     }
 
@@ -954,20 +1024,24 @@ impl App {
 
     /// Timed tick: render only the configured screen (or all if render_screen < 0).
     fn tick(&mut self) {
+        let t0 = std::time::Instant::now();
         self.pull_audio();
+        self.profile_mark("pull_audio", t0);
+        let scene = self.compute_scene();
         let target = self.cfg.render_screen;
         if target >= 0 {
             let idx = target as usize;
             if idx < self.outputs.len() && !self.outputs[idx].closed && self.outputs[idx].width > 0 {
-                self.draw_one(idx);
+                self.render_output(idx, &scene);
             }
         } else {
             for idx in 0..self.outputs.len() {
                 if !self.outputs[idx].closed && self.outputs[idx].width > 0 {
-                    self.draw_one(idx);
+                    self.render_output(idx, &scene);
                 }
             }
         }
+        self.profile_maybe_log();
     }
 
     fn pull_audio(&mut self) {
@@ -976,15 +1050,39 @@ impl App {
         }
     }
 
-    fn draw_one(&mut self, idx: usize) {
-        let (layer, width, height, closed) = {
-            let o = &mut self.outputs[idx];
-            (o.layer.clone(), o.width, o.height, o.closed)
-        };
-        if closed || width == 0 || height == 0 {
+    /// Record a timing checkpoint for the profiling summary (PULSE_RING_PROFILE=1).
+    fn profile_mark(&mut self, name: &str, start: std::time::Instant) {
+        if !self.profile_enabled {
             return;
         }
+        let d = start.elapsed().as_secs_f32();
+        match name {
+            "pull_audio" => self.profile.pull_audio += d,
+            "lua" => self.profile.lua += d,
+            "plugins" => self.profile.plugins += d,
+            "plugin_tex" => self.profile.plugin_tex += d,
+            "particles" => self.profile.particles += d,
+            "widgets" => self.profile.widgets += d,
+            "render" => self.profile.render += d,
+            _ => {}
+        }
+    }
 
+    fn profile_maybe_log(&mut self) {
+        if !self.profile_enabled {
+            return;
+        }
+        self.profile_frames += 1;
+        if self.profile_frames % 60 == 0 {
+            log::info!("{}", ProfileStats::format_line(&self.profile));
+            self.profile = ProfileStats::default();
+        }
+    }
+
+    /// Compute the full scene ONCE per tick (audio, Lua, plugins, particles, widgets).
+    /// Every output consumes the same SceneFrame, so CPU work no longer scales with monitor count.
+    fn compute_scene(&mut self) -> SceneFrame {
+        let t_lua = std::time::Instant::now();
         let elapsed = self.start.elapsed().as_secs_f32();
         if elapsed - self.last_music_poll > 2.0 {
             self.last_music_poll = elapsed;
@@ -995,7 +1093,9 @@ impl App {
         // transforms never feed back into themselves (which caused cumulative amplification).
         let mut render_bands = self.lua_state.transform_bands(&self.bands);
         self.lua_state.frame(&mut self.cfg, &self.bands, elapsed, &self.music);
+        self.profile_mark("lua", t_lua);
         // Rust plugins: per-frame update + band transform chain.
+        let t_plugins = std::time::Instant::now();
         let (h, m, s, _) = main_now_hmsparts();
         let cfg_ptr = &self.cfg as *const crate::config::Config;
         for p in self.plugins.iter_mut() {
@@ -1021,7 +1121,10 @@ impl App {
                 render_bands[i] = sm;
             }
         }
+        self.profile_mark("plugins", t_plugins);
+        let t_ptex = std::time::Instant::now();
         self.render_plugin_textures();
+        self.profile_mark("plugin_tex", t_ptex);
         let spawn_scale = spawn_scale_for(&self.cfg, elapsed);
         let spawn_t = (elapsed / (self.cfg.spawn_duration.max(1.0) / 1000.0)).min(1.0);
         let spawn_effect = match self.cfg.spawn_effect {
@@ -1036,10 +1139,53 @@ impl App {
         // Time-domain low-pass: the ring band follows the music smoothly, so the particle
         // orbit swells and settles gently instead of twitching in/out.
         self.ring_amp_smooth = self.ring_amp_smooth * 0.90 + amp_avg * 0.10;
-        let particles = compute_particles(&self.cfg, elapsed, width, height, self.ring_amp_smooth);
+        // Particle math needs a screen size; use the first configured output.
+        let (sw, sh) = self
+            .outputs
+            .iter()
+            .find(|o| o.width > 0)
+            .map(|o| (o.width, o.height))
+            .unwrap_or((1920, 1080));
+        let t_particles = std::time::Instant::now();
+        let particles = compute_particles(&self.cfg, elapsed, sw, sh, self.ring_amp_smooth);
+        self.profile_mark("particles", t_particles);
+        // Widgets need &mut self (cover poll, clock raster cache); once per frame.
+        let t_widgets = std::time::Instant::now();
+        let widgets_cfg: Vec<crate::config::WidgetConfig> =
+            self.cfg.widgets.iter().take(32).cloned().collect();
+        let widgets = self.prepare_widgets(&widgets_cfg);
+        self.profile_mark("widgets", t_widgets);
+        let bar_energy = compute_bar_energy(&render_bands);
+        let overall = compute_overall_energy(&render_bands);
+        SceneFrame {
+            render_bands,
+            spawn_scale,
+            spawn_t,
+            spawn_effect,
+            spawn_rot,
+            rotate_rad,
+            amp_avg,
+            particles,
+            widgets,
+            bar_energy,
+            overall,
+            widgets_cfg,
+        }
+    }
 
-        // Widgets need &mut self; do it before borrowing the renderer.
-        let mut widgets = self.prepare_widgets(width, height);
+    /// Render ONE output from a shared scene: upload textures to this renderer's atlas,
+    /// set uniforms, draw, damage the surface and commit. Cheap per-output work only.
+    fn render_output(&mut self, idx: usize, scene: &SceneFrame) {
+        let t_render = std::time::Instant::now();
+        let (layer, width, height, closed) = {
+            let o = &mut self.outputs[idx];
+            (o.layer.clone(), o.width, o.height, o.closed)
+        };
+        if closed || width == 0 || height == 0 {
+            return;
+        }
+        // Local mutable copy so per-renderer atlas UVs can be patched in.
+        let mut widgets = scene.widgets;
         let renderer = &mut self.outputs[idx].renderer;
         // Cover texture: upload to every renderer independently (multi-monitor safe).
         if let Some(img) = &self.current_cover {
@@ -1078,31 +1224,9 @@ impl App {
         }
         renderer.set_widgets(&widgets);
         renderer.resize(width, height);
-        renderer.set_auto_rotate(rotate_rad);
-        // Precompute 64 bar energies from the render bands (bars widgets look these up).
-        let mut bar_energy = [0.0f32; 64];
-        {
-            let n = render_bands.len();
-            for bi in 0..64 {
-                let lo = bi * n / 64;
-                let hi = ((bi + 1) * n / 64).max(lo + 1);
-                let mut acc = 0.0f32;
-                for i in lo..hi {
-                    acc += render_bands[i];
-                }
-                bar_energy[bi] = acc / (hi - lo) as f32;
-            }
-        }
-        renderer.set_bar_energy(&bar_energy);
-        // Overall energy (mid band mean) for the uniform-mode rings.
-        let overall = {
-            let mut acc = 0.0f32;
-            for i in 16..96 {
-                acc += render_bands[i];
-            }
-            acc / 80.0
-        };
-        renderer.set_overall_energy(overall);
+        renderer.set_auto_rotate(scene.rotate_rad);
+        renderer.set_bar_energy(&scene.bar_energy);
+        renderer.set_overall_energy(scene.overall);
         let pcount = self.cfg.particles.len().min(32) as u32;
         renderer.set_particle_count(pcount);
         // Particle band centre (px): ring base + half growth + halo + typical offset.
@@ -1110,7 +1234,16 @@ impl App {
             + self.cfg.particles.first().map(|p| p.x).unwrap_or(0.012)) * (width.min(height) as f32);
         renderer.set_particle_band(band_r);
         renderer.set_render_scale(self.cfg.render_scale);
-        renderer.render(&render_bands, spawn_scale, spawn_effect, spawn_t, spawn_rot, &particles, elapsed);
+        renderer.render(
+            &scene.render_bands,
+            scene.spawn_scale,
+            scene.spawn_effect,
+            scene.spawn_t,
+            scene.spawn_rot,
+            &scene.particles,
+            self.start.elapsed().as_secs_f32(),
+        );
+        self.profile_mark("render", t_render);
 
         let surface = layer.wl_surface();
         // Damage only the region where the rings/widgets actually live (centre band +
@@ -1157,5 +1290,34 @@ PulseRing {
         for w in &cfg.widgets {
             println!("widget: {:?} x={} y={} size={} alpha={}", w.widget_type, w.x, w.y, w.size, w.alpha);
         }
+    }
+
+    #[test]
+    fn profile_stats_accumulates_and_formats() {
+        let mut p = super::ProfileStats::default();
+        p.pull_audio = 0.001;
+        p.lua = 0.002;
+        p.plugins = 0.003;
+        p.plugin_tex = 0.004;
+        p.particles = 0.005;
+        p.widgets = 0.006;
+        p.render = 0.007;
+        let s = super::ProfileStats::format_line(&p);
+        assert!(s.contains("pull_audio=1.0ms"), "got: {s}");
+        assert!(s.contains("render=7.0ms"), "got: {s}");
+        assert!(s.contains("total=28.0ms"), "got: {s}");
+    }
+
+    #[test]
+    fn bar_energy_and_overall_are_correct() {
+        let mut bands = [0.0f32; super::NBANDS];
+        bands[40] = 1.0; // a mid band (inside 16..96)
+        let be = super::compute_bar_energy(&bands);
+        // bin 20 covers bands 40..42 -> mean 0.5
+        assert!((be[20] - 0.5).abs() < 1e-6, "be[20]={}", be[20]);
+        assert_eq!(be[0], 0.0);
+        let ov = super::compute_overall_energy(&bands);
+        // 1.0 / 80 over mid bands 16..96
+        assert!((ov - 1.0 / 80.0).abs() < 1e-6, "ov={ov}");
     }
 }
