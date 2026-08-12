@@ -139,11 +139,11 @@ struct App {
     lyric_tx: std::sync::mpsc::Sender<String>,
     lyric_rx: std::sync::mpsc::Receiver<(String, Option<lyrics::LyricData>)>,
     lyric_pos_poll_elapsed: f32,
-    /// Per-widget-slot raster cache for lyric banners: (signature, image, line_uv_top, line_uv_h).
-    lyric_cache: Vec<Option<(String, ImageData, f32, f32)>>,
-    /// Async banner rasteriser: (seq, request) sender / (seq, image, line_uv_top, line_uv_h) receiver.
+    /// Per-widget-slot raster cache for lyric banners: (signature, image).
+    lyric_cache: Vec<Option<(String, ImageData)>>,
+    /// Async banner rasteriser: (seq, request) sender / (seq, image) receiver.
     lyric_raster_tx: std::sync::mpsc::Sender<(u64, LyricRasterReq)>,
-    lyric_raster_rx: std::sync::mpsc::Receiver<(u64, ImageData, f32, f32)>,
+    lyric_raster_rx: std::sync::mpsc::Receiver<(u64, ImageData)>,
     lyric_raster_seq: u64,
     /// In-flight request tags: (seq, widget slot, signature) — results only land if
     /// the signature is still current, so stale renders are dropped.
@@ -753,33 +753,27 @@ struct LyricRasterReq {
     prev: Option<String>,
     current: String,
     next: Option<String>,
-    words: Vec<(f32, f32, String)>,
-    word_idx: usize,
     style: LyricStyle,
 }
 
 /// Spawn the lyric banner rasteriser worker. Returns (request sender, result receiver).
-/// Results carry the current line's UV rect (top, height) inside the banner for the
-/// shader-side karaoke clip.
 fn spawn_lyric_raster_thread() -> (
     std::sync::mpsc::Sender<(u64, LyricRasterReq)>,
-    std::sync::mpsc::Receiver<(u64, ImageData, f32, f32)>,
+    std::sync::mpsc::Receiver<(u64, ImageData)>,
 ) {
     let (tx, rx) = std::sync::mpsc::channel::<(u64, LyricRasterReq)>();
-    let (res_tx, res_rx) = std::sync::mpsc::channel::<(u64, ImageData, f32, f32)>();
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<(u64, ImageData)>();
     std::thread::spawn(move || {
         while let Ok((seq, req)) = rx.recv() {
-            let r = rasterize_lyric_image(
+            let img = rasterize_lyric_image(
                 &req.font,
                 req.prev.as_deref(),
                 &req.current,
                 req.next.as_deref(),
-                &req.words,
-                req.word_idx,
                 &req.style,
             );
-            if let Some((img, top, h)) = r {
-                if res_tx.send((seq, img, top, h)).is_err() {
+            if let Some(img) = img {
+                if res_tx.send((seq, img)).is_err() {
                     break;
                 }
             }
@@ -1155,10 +1149,11 @@ fn rasterize_lyric_image(
     prev: Option<&str>,
     current: &str,
     next: Option<&str>,
-    words: &[(f32, f32, String)],
-    word_idx: usize,
     st: &LyricStyle,
-) -> Option<(ImageData, f32, f32)> {
+) -> Option<ImageData> {
+    // Line-level highlighting: the CURRENT line is baked fully lit (gold->white
+    // gradient), prev/next are dimmed. No per-line or per-word progress — the line
+    // simply lights up while it is being sung. Rasterised ONCE per line.
     let current = current.trim();
     if current.is_empty() {
         return None;
@@ -1183,11 +1178,7 @@ fn rasterize_lyric_image(
     let show_prev = !prev_line.is_empty();
     let show_next = !next_line.is_empty();
     let sub_lines = (if show_prev { 1 } else { 0 }) + (if show_next { 1 } else { 0 });
-    let cur_w: u32 = if !words.is_empty() {
-        words.iter().map(|(_, _, t)| line_w(t, cur_scale)).sum()
-    } else {
-        line_w(current, cur_scale)
-    };
+    let cur_w = line_w(current, cur_scale);
     let w = cur_w
         .max(if show_prev { line_w(prev_line, sub_scale) } else { 0 })
         .max(if show_next { line_w(next_line, sub_scale) } else { 0 })
@@ -1217,54 +1208,27 @@ fn rasterize_lyric_image(
     }
     let base_x = ((w as i64 - cur_w as i64) / 2).max(0) as f32;
     let baseline = cur_ascent + cur_top as f32;
-    if !words.is_empty() {
-        // Word-level karaoke: baked three-state colours + glow (re-rasterised per word).
-        let mut wx = base_x;
-        for (i, (_, _, wt)) in words.iter().enumerate() {
-            let color = if i < word_idx {
-                st.sung
-            } else if i == word_idx {
-                st.cur
-            } else {
-                st.base
-            };
-            let glow = if i == word_idx {
-                Some(st.glow)
-            } else if i < word_idx {
-                Some([st.glow[0], st.glow[1], st.glow[2], st.glow[3] * 0.5])
-            } else {
-                None
-            };
-            blit_word(&mut img, font, wt, cur_scale, wx, baseline, color, glow, 1.0);
-            wx += line_w(wt, cur_scale) as f32;
+    // Current line: fully lit gradient with a soft glow halo.
+    if st.glow[3] > 0.004 {
+        let r = 3.0;
+        for (ox, oy) in [
+            (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r),
+            (r * 0.71, r * 0.71), (r * 0.71, -r * 0.71),
+            (-r * 0.71, r * 0.71), (-r * 0.71, -r * 0.71),
+        ] {
+            blit_text(&mut img, font, current, cur_scale, base_x + ox, baseline + oy,
+                st.glow, 0.35, None);
         }
-    } else {
-        // Plain line: bake the current line in its full LIT gradient (gold -> white);
-        // the shader reveals it left-to-right via the karaoke progress uniform, so this
-        // raster is done ONCE per line instead of once per frame.
-        if st.glow[3] > 0.004 {
-            let r = 3.0;
-            for (ox, oy) in [
-                (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r),
-                (r * 0.71, r * 0.71), (r * 0.71, -r * 0.71),
-                (-r * 0.71, r * 0.71), (-r * 0.71, -r * 0.71),
-            ] {
-                blit_text(&mut img, font, current, cur_scale, base_x + ox, baseline + oy,
-                    st.glow, 0.35, None);
-            }
-        }
-        let stops = [st.sung, mix_color(st.sung, st.cur, 0.55), st.cur];
-        blit_gradient_clipped(&mut img, font, current, cur_scale, base_x, baseline, &stops, cur_w as f32, f32::MAX, 1.0);
     }
+    let stops = [st.sung, mix_color(st.sung, st.cur, 0.55), st.cur];
+    blit_gradient_clipped(&mut img, font, current, cur_scale, base_x, baseline, &stops, cur_w as f32, f32::MAX, 1.0);
     if show_next {
         blit_text(&mut img, font, next_line, sub_scale, center_x(next_line, sub_scale),
             sub_ascent + next_top as f32, dim_color(st.base), 1.0, None);
     }
-    // Current line's UV rect (top, height) as fractions of the banner.
-    let line_top = cur_top as f32 / h as f32;
-    let line_h = cur_h as f32 / h as f32;
-    Some((img, line_top, line_h))
+    Some(img)
 }
+
 
 impl App {
     /// Compute widget uniform data (12 f32 each). Returns the 96-float layout.
@@ -1285,7 +1249,7 @@ impl App {
                 WidgetType::Cover => 4.0,
                 WidgetType::Analog => 5.0,
                 WidgetType::Plugin => 6.0,
-                WidgetType::Lyric => 7.0, // textured quad with GPU karaoke clip
+                WidgetType::Lyric => 1.0, // textured quad, like Image
             };
             data[o + 1] = w.x;
             data[o + 2] = w.y;
@@ -1447,10 +1411,10 @@ impl App {
                     data[o + 6] = ti as f32;
                 }
                 WidgetType::Lyric => {
-                    // Current song lyric banner. Rasterised ONCE per line on the worker
-                    // thread; the karaoke progress is a per-frame GPU uniform so nothing
-                    // re-rasterises while the song plays (plain lines), and word-level
-                    // lines re-raster only when the current word changes.
+                    // Current song lyric banner. Line-level highlighting: the current
+                    // line is baked fully lit (gold->white gradient + glow), prev/next
+                    // dim. Rasterised ONCE per line on the worker thread — nothing
+                    // re-rasterises while the song plays. No per-frame uniforms.
                     let Some(lt) = self.lyric_time() else { continue };
                     let Some(ldata) = &self.lyric_data else { continue };
                     let Some(ls) = lyrics::line_state(ldata, lt + w.lyric_offset) else { continue };
@@ -1465,9 +1429,7 @@ impl App {
                     } else {
                         None
                     };
-                    let words = &ldata.lines[ls.index].words;
-                    let word_idx = ls.word.min(words.len().saturating_sub(1));
-                    // Colours: colors[0]=base(未唱/上下行) colors[1]=已唱 colors[2]=当前字 colors[3]=辉光
+                    // Colours: colors[0]=base(上下行) colors[1]=点亮色 colors[2]=高光 colors[3]=辉光
                     let style = LyricStyle {
                         font_size: w.font_size,
                         base: w.colors.first().copied().unwrap_or([0.85, 0.9, 1.0, 1.0]),
@@ -1476,34 +1438,28 @@ impl App {
                         glow: w.colors.get(3).copied().unwrap_or([0.7, 0.53, 1.0, 0.75]),
                         show_prev_next: w.show_prev_next,
                     };
-                    // Plain lines (no word timestamps) rasterise once per line — the
-                    // signature excludes progress. Word lines re-raster per word.
-                    let karaoke_gpu = words.is_empty();
                     let sig = format!(
-                        "{slot}|{}|{}|{}|{}|{}|{}|{}|{}",
+                        "{slot}|{}|{}|{}|{}|{}|{}",
                         self.lyric_key,
                         cur,
                         prev.unwrap_or(""),
                         next.unwrap_or(""),
-                        word_idx,
-                        words.len(),
                         w.font_size,
                         w.show_prev_next,
                     );
                     // Drain finished renders first (results arrive in order; only the
                     // newest request per slot stays in `pending`, so applying is safe).
-                    while let Ok((rseq, rimg, rtop, rh)) = self.lyric_raster_rx.try_recv() {
+                    while let Ok((rseq, rimg)) = self.lyric_raster_rx.try_recv() {
                         if let Some(pos) = self.lyric_raster_pending.iter().position(|(s, _, _)| *s == rseq) {
                             let (_, rslot, rsig) = self.lyric_raster_pending.remove(pos);
-                            self.lyric_cache[rslot] = Some((rsig, rimg, rtop, rh));
+                            self.lyric_cache[rslot] = Some((rsig, rimg));
                         }
                     }
                     if self.lyric_raster_pending.len() > 8 {
                         self.lyric_raster_pending.drain(0..4);
                     }
-                    let cached = self.lyric_cache[slot].as_ref().map(|(cs, im, t, h)| (cs.clone(), im.clone(), *t, *h));
-                    let (rendered, line_top, line_h): (Option<ImageData>, f32, f32) = match cached {
-                        Some((cs, im, t, h)) if cs == sig => (Some(im), t, h),
+                    let rendered: Option<ImageData> = match &self.lyric_cache[slot] {
+                        Some((cs, im)) if *cs == sig => Some(im.clone()),
                         _ => {
                             // Cache miss: keep showing the stale banner, request async.
                             self.lyric_raster_seq += 1;
@@ -1514,18 +1470,13 @@ impl App {
                                 prev: prev.map(str::to_string),
                                 current: cur.clone(),
                                 next: next.map(str::to_string),
-                                words: words.clone(),
-                                word_idx,
                                 style,
                             };
                             let _ = self.lyric_raster_tx.send((seq, req));
                             // A new request supersedes any older in-flight one for this slot.
                             self.lyric_raster_pending.retain(|(_, s, _)| *s != slot);
                             self.lyric_raster_pending.push((seq, slot, sig));
-                            match &self.lyric_cache[slot] {
-                                Some((_, im, t, h)) => (Some(im.clone()), *t, *h),
-                                None => (None, 0.0, 1.0),
-                            }
+                            self.lyric_cache[slot].as_ref().map(|(_, im)| im.clone())
                         }
                     };
                     if let Some(img) = rendered {
@@ -1534,15 +1485,9 @@ impl App {
                         let (iw, ih) = (img.w as f32, img.h as f32);
                         // Render the banner at its NATIVE size: the quad width tracks the
                         // rasterised width, so the text is always `fontSize` on screen.
-                        // (A fixed quad width would stretch short lines into huge text.)
                         data[o + 3] = (iw / min_d).clamp(0.01, 0.95);
                         data[o + 6] = tex_index as f32;
                         data[o + 11] = ih / iw;
-                        // Shader-side karaoke uniforms: progress + current-line UV rect.
-                        data[o + 18] = if karaoke_gpu { ls.progress.clamp(0.0, 1.0) } else { 0.0 };
-                        data[o + 19] = line_top;
-                        data[o + 20] = line_h;
-                        data[o + 21] = if karaoke_gpu { 1.0 } else { 0.0 };
                         self.texture_slots[tex_index as usize] = Some(img);
                         self.texture_dirty[tex_index as usize] = true;
                         tex_index += 1;
@@ -2090,7 +2035,7 @@ PulseRing {
     }
 
     #[test]
-    fn lyric_raster_has_karaoke_clip() {
+    fn lyric_raster_current_line_is_lit() {
         use crate::{load_font, rasterize_lyric_image, LyricStyle};
         let font = load_font();
         let st = LyricStyle {
@@ -2101,11 +2046,9 @@ PulseRing {
             glow: [0.7, 0.53, 1.0, 0.75],
             show_prev_next: false,
         };
-        let (img, _, _) = rasterize_lyric_image(&font, None, "hello world", None, &[], 0, &st)
-            .expect("rasterize");
+        // Current line is baked fully lit (gold -> white gradient across its width).
+        let img = rasterize_lyric_image(&font, None, "hello world", None, &st).expect("rasterize");
         assert!(img.w > 10 && img.h > 4);
-        // The plain line is baked in the LIT gradient (gold -> white) across its width;
-        // the GPU shader handles the dimming/reveal. Verify the gradient colours exist.
         let mid = img.h / 2;
         let mut found_gold = false;
         let mut found_white = false;
@@ -2113,11 +2056,9 @@ PulseRing {
             let o = ((mid * img.w + x) * 4) as usize;
             let (r, g, b, a) = (img.rgba[o], img.rgba[o + 1], img.rgba[o + 2], img.rgba[o + 3]);
             if a > 40 {
-                // gradient start: gold-ish (r high, mid g, low b)
                 if r > 190 && g > 120 && g < 235 && b < 130 {
                     found_gold = true;
                 }
-                // gradient end: bright white
                 if r > 230 && g > 230 && b > 230 {
                     found_white = true;
                 }
@@ -2127,46 +2068,35 @@ PulseRing {
         assert!(found_white, "no white gradient end");
     }
 
-    #[test]
-    fn lyric_raster_words_have_three_states() {
+    fn lyric_raster_prev_next_are_dim() {
         use crate::{load_font, rasterize_lyric_image, LyricStyle};
         let font = load_font();
         let st = LyricStyle {
             font_size: 40.0,
-            base: [0.5, 0.5, 0.6, 1.0],   // unsung: dim blue-grey
-            sung: [1.0, 0.78, 0.35, 1.0], // sung: orange
-            cur: [0.9, 0.1, 0.1, 1.0],    // current: red
+            base: [0.85, 0.9, 1.0, 1.0],
+            sung: [1.0, 0.78, 0.35, 1.0],
+            cur: [1.0, 1.0, 1.0, 1.0],
             glow: [0.0, 0.0, 0.0, 0.0],
-            show_prev_next: false,
+            show_prev_next: true,
         };
-        let words = vec![
-            (0.0, 1.0, "AAA".to_string()),
-            (1.0, 2.0, "BBB".to_string()),
-            (2.0, 3.0, "CCC".to_string()),
-        ];
-        let (img, _, _) = rasterize_lyric_image(&font, None, "AAABBBCCC", None, &words, 1, &st)
-            .expect("rasterize");
-        let mid = img.h / 2;
-        let mut sung = 0;
-        let mut cur = 0;
-        let mut unsung = 0;
-        for x in 0..img.w {
-            let o = ((mid * img.w + x) * 4) as usize;
-            let (r, g, b, a) = (img.rgba[o], img.rgba[o + 1], img.rgba[o + 2], img.rgba[o + 3]);
-            if a > 60 {
-                if r > 200 && g < 140 && b < 140 {
-                    cur += 1; // red-ish
-                } else if r > 200 && g > 140 && g < 230 && b < 120 {
-                    sung += 1; // orange
-                } else if r < 160 {
-                    unsung += 1; // dim blue-grey
+        // prev + current + next: the current line must be far brighter than the dim
+        // prev/next lines (line-level highlighting).
+        let img = rasterize_lyric_image(&font, Some("prev"), "CURRENT", Some("next"), &st).expect("rasterize");
+        assert!(img.h > 30, "banner should have 3 lines, got h={}", img.h);
+        let mut lit = 0usize;
+        let mut dim = 0usize;
+        for y in 0..img.h {
+            for x in 0..img.w {
+                let o = ((y * img.w + x) * 4) as usize;
+                let a = img.rgba[o + 3] as usize;
+                if a > 120 {
+                    lit += 1;
+                } else if a > 40 {
+                    dim += 1;
                 }
             }
         }
-        assert!(cur > 0, "current word (red) missing");
-        assert!(sung > 0, "sung word (orange) missing");
-        assert!(unsung > 0, "unsung word (dim) missing");
+        assert!(lit > 40, "current line should have many fully-lit pixels, got {lit}");
+        assert!(dim > 0, "prev/next dim pixels expected");
     }
-
 }
-

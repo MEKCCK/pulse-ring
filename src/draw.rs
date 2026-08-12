@@ -1352,43 +1352,8 @@ const SHADER_SRC: &str = stringify!(
                     w_col += tc.rgb * tc.a * walpha;
                     w_a += tc.a * walpha;
                 }
-            } else if (wtype == 7.0) {
-                // Lyric widget: textured quad with GPU karaoke. The current line's band
-                // is revealed left-to-right by the progress uniform; the lit gradient is
-                // baked in the texture, unrevealed pixels are dimmed. Zero re-raster.
-                let uv_x = u.widgets[wo + 7u];
-                let uv_y = u.widgets[wo + 8u];
-                let uv_w = u.widgets[wo + 9u];
-                let uv_h = u.widgets[wo + 10u];
-                let aspect = u.widgets[wo + 11u];
-                let kprogress = u.widgets[wo + 18u];
-                let line_top = u.widgets[wo + 19u];
-                let line_h = u.widgets[wo + 20u];
-                let kmode = u.widgets[wo + 21u];
-                let half = vec2<f32>(wsize * min_d, wsize * min_d * aspect) * 0.5;
-                if (abs(wd.x) < half.x && abs(wd.y) < half.y) {
-                    let uv = vec2<f32>(
-                        uv_x + (wd.x / (half.x * 2.0) + 0.5) * uv_w,
-                        uv_y + (wd.y / (half.y * 2.0) + 0.5) * uv_h,
-                    );
-                    let tc = textureSample(widget_texture, widget_sampler, uv);
-                    var reveal = 1.0;
-                    if (kmode > 0.5) {
-                        // Inside the current line's band (fy = 0..1 within the banner):
-                        // lit where fx < progress.
-                        let fy = (uv.y - uv_y) / max(uv_h, 0.0001);
-                        let in_line = (fy >= line_top) && (fy < line_top + line_h);
-                        if (in_line) {
-                            let fx = (uv.x - uv_x) / max(uv_w, 0.0001);
-                            reveal = smoothstep(fx - 0.02, fx, kprogress);
-                        }
-                    }
-                    let dim = 0.45 + 0.55 * reveal;
-                    w_col += tc.rgb * tc.a * walpha * dim;
-                    w_a += tc.a * walpha * dim;
-                }
             } else {
-                // Image / clock widget.
+                // Image / clock / lyric widget.
                 let uv_x = u.widgets[wo + 7u];
                 let uv_y = u.widgets[wo + 8u];
                 let uv_w = u.widgets[wo + 9u];
