@@ -126,6 +126,7 @@ struct App {
     interval: std::time::Duration,
     idle_since: Option<f32>,
     max_fps: u32,
+    idle_fps: u32,
     plugin_buf: Vec<u8>,
     lyric_data: Option<lyrics::LyricData>,
     lyric_key: String,
@@ -226,6 +227,11 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(30)
             .clamp(15, 60),
+        idle_fps: std::env::var("PULSE_RING_IDLE_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15)
+            .clamp(5, 30),
         plugin_buf: Vec::new(),
         lyric_data: None,
         lyric_key: String::new(),
@@ -581,10 +587,12 @@ fn compute_widget_bounds(widgets: &[crate::config::WidgetConfig], width: u32, he
     out
 }
 
-/// Frame interval in ms: idle (no audio) -> 5fps; active -> 30fps, or 60fps when opted in.
-fn frame_interval_ms(energy_max: f32, max_fps: u32) -> u64 {
+/// Frame interval in ms: idle (no audio) -> idle_fps (default 15); active -> 30fps,
+/// or 60fps when opted in. Idle stays high enough that the time-based ambient
+/// animations (breathing, auto-rotation, particles, clocks) keep looking smooth.
+fn frame_interval_ms(energy_max: f32, max_fps: u32, idle_fps: u32) -> u64 {
     if energy_max < 0.002 {
-        200
+        (1000 / idle_fps.clamp(5, 30)).max(33) as u64
     } else if max_fps >= 60 {
         16
     } else {
@@ -1337,6 +1345,7 @@ impl App {
         self.interval = std::time::Duration::from_millis(frame_interval_ms(
             if is_idle { 0.0 } else { energy_max },
             self.max_fps,
+            self.idle_fps,
         ));
         let scene = self.compute_scene();
         let target = self.cfg.render_screen;
@@ -1671,10 +1680,10 @@ PulseRing {
     #[test]
     fn frame_interval_adapts_to_energy() {
         use super::frame_interval_ms;
-        assert_eq!(frame_interval_ms(0.0, 30), 200); // idle -> 5fps
-        assert_eq!(frame_interval_ms(0.001, 30), 200); // below threshold -> idle
-        assert_eq!(frame_interval_ms(0.01, 30), 33); // active 30fps
-        assert_eq!(frame_interval_ms(0.01, 60), 16); // active 60fps
+        assert_eq!(frame_interval_ms(0.0, 30, 15), 66); // idle 15fps
+        assert_eq!(frame_interval_ms(0.001, 30, 20), 50); // idle 20fps
+        assert_eq!(frame_interval_ms(0.01, 30, 15), 33); // active 30fps
+        assert_eq!(frame_interval_ms(0.01, 60, 15), 16); // active 60fps
     }
 
     #[test]
