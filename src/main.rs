@@ -981,9 +981,9 @@ fn rasterize_text(font: &rusttype::Font, text: &str, size_pt: f32, color: [f32; 
                     if px < img.w && py < img.h {
                         let a = cov * ca;
                         let o = ((py * img.w + px) * 4) as usize;
-                        img.rgba[o] = (cr * 255.0 * a) as u8;
-                        img.rgba[o + 1] = (cg * 255.0 * a) as u8;
-                        img.rgba[o + 2] = (cb * 255.0 * a) as u8;
+                        img.rgba[o] = (cr * 255.0) as u8;
+                        img.rgba[o + 1] = (cg * 255.0) as u8;
+                        img.rgba[o + 2] = (cb * 255.0) as u8;
                         img.rgba[o + 3] = (a * 255.0) as u8;
                     }
                 });
@@ -1039,9 +1039,12 @@ fn blit_text(
                         return;
                     }
                     let o = ((py * img.w + px) * 4) as usize;
-                    img.rgba[o] = (color[0] * 255.0 * a) as u8;
-                    img.rgba[o + 1] = (color[1] * 255.0 * a) as u8;
-                    img.rgba[o + 2] = (color[2] * 255.0 * a) as u8;
+                    // NON-premultiplied storage: RGB = the display colour, alpha separate.
+                    // The shader does `tc.rgb * tc.a`, so premultiplying here (rgb*a)
+                    // would multiply the edge alpha twice and turn glyph edges black.
+                    img.rgba[o] = (color[0] * 255.0) as u8;
+                    img.rgba[o + 1] = (color[1] * 255.0) as u8;
+                    img.rgba[o + 2] = (color[2] * 255.0) as u8;
                     img.rgba[o + 3] = (a * 255.0) as u8;
                 }
             });
@@ -1113,9 +1116,9 @@ fn blit_gradient_clipped(
                         return;
                     }
                     let o = ((py * img.w + px) * 4) as usize;
-                    img.rgba[o] = (c[0] * 255.0 * a) as u8;
-                    img.rgba[o + 1] = (c[1] * 255.0 * a) as u8;
-                    img.rgba[o + 2] = (c[2] * 255.0 * a) as u8;
+                    img.rgba[o] = (c[0] * 255.0) as u8;
+                    img.rgba[o + 1] = (c[1] * 255.0) as u8;
+                    img.rgba[o + 2] = (c[2] * 255.0) as u8;
                     img.rgba[o + 3] = (a * 255.0) as u8;
                 }
             });
