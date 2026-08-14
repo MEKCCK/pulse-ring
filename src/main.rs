@@ -32,6 +32,91 @@ use draw::RingRenderer;
 
 const MAX_PARTICLES: usize = 96;
 const PARTICLE_STRIDE: usize = 12;
+const GENERAL_TEXTURE_SLOTS: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
+const COVER_TEXTURE_SLOT: usize = 3;
+const PLUGIN_TEXTURE_START: usize = 8;
+const MAX_PLUGIN_TEXTURES: usize = draw::ATLAS_CAPACITY - PLUGIN_TEXTURE_START;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TextureKind {
+    #[default]
+    General,
+    Lyric,
+    Cover,
+    Plugin,
+}
+
+#[derive(Default)]
+struct TextureSlotState {
+    key: String,
+    image: Option<std::sync::Arc<ImageData>>,
+    revision: u64,
+    kind: TextureKind,
+}
+
+impl TextureSlotState {
+    fn update(
+        &mut self,
+        key: String,
+        image: std::sync::Arc<ImageData>,
+        kind: TextureKind,
+    ) -> bool {
+        if self.image.is_some() && self.key == key {
+            return false;
+        }
+        self.key = key;
+        self.image = Some(image);
+        self.kind = kind;
+        self.revision = self.revision.wrapping_add(1).max(1);
+        true
+    }
+}
+
+fn texture_needs_upload(slot_revision: u64, uploaded_revision: u64) -> bool {
+    slot_revision != 0 && slot_revision != uploaded_revision
+}
+
+fn lyric_request_needed(
+    cached_signature: Option<&str>,
+    pending_signature: Option<&str>,
+    desired_signature: &str,
+) -> bool {
+    cached_signature != Some(desired_signature) && pending_signature != Some(desired_signature)
+}
+
+fn lyric_result_is_current(
+    pending: Option<&(u64, String)>,
+    generation: u64,
+    result_signature: &str,
+    desired_signature: &str,
+) -> bool {
+    pending.is_some_and(|(pending_generation, pending_signature)| {
+        *pending_generation == generation
+            && pending_signature == result_signature
+            && result_signature == desired_signature
+    })
+}
+
+fn texture_slot_layout(
+    widgets: &[crate::config::WidgetConfig],
+) -> ([Option<usize>; 32], usize) {
+    use crate::config::WidgetType;
+    let mut layout = [None; 32];
+    let mut next = 0usize;
+    let mut overflow = 0usize;
+    for (widget_slot, widget) in widgets.iter().take(32).enumerate() {
+        if !matches!(widget.widget_type, WidgetType::Image | WidgetType::Clock | WidgetType::Lyric) {
+            continue;
+        }
+        if let Some(&texture_slot) = GENERAL_TEXTURE_SLOTS.get(next) {
+            layout[widget_slot] = Some(texture_slot);
+            next += 1;
+        } else {
+            overflow += 1;
+        }
+    }
+    (layout, overflow)
+}
 
 /// Per-frame timing breakdown (seconds). Filled when PULSE_RING_PROFILE=1.
 #[derive(Default, Clone, Copy)]
@@ -43,15 +128,32 @@ pub struct ProfileStats {
     pub particles: f32,
     pub widgets: f32,
     pub render: f32,
+    pub max_frame: f32,
+    pub lyric_requests: u64,
+    pub lyric_deduped: u64,
+    pub lyric_stale_results: u64,
+    pub lyric_uploads: u64,
 }
 
 impl ProfileStats {
-    pub fn format_line(s: &Self) -> String {
+    pub fn format_line(s: &Self, frames: u32) -> String {
+        let frames = frames.max(1) as f32;
         let total = s.pull_audio + s.lua + s.plugins + s.plugin_tex + s.particles + s.widgets + s.render;
         format!(
-            "[profile] pull_audio={:.1}ms lua={:.1}ms plugins={:.1}ms plugin_tex={:.1}ms particles={:.1}ms widgets={:.1}ms render={:.1}ms total={:.1}ms",
-            s.pull_audio * 1000.0, s.lua * 1000.0, s.plugins * 1000.0, s.plugin_tex * 1000.0,
-            s.particles * 1000.0, s.widgets * 1000.0, s.render * 1000.0, total * 1000.0,
+            "[profile avg/{frames:.0}] pull_audio={:.2}ms lua={:.2}ms plugins={:.2}ms plugin_tex={:.2}ms particles={:.2}ms widgets={:.2}ms render={:.2}ms total={:.2}ms max_frame={:.2}ms lyric{{requests={},deduped={},stale={},uploads={}}}",
+            s.pull_audio * 1000.0 / frames,
+            s.lua * 1000.0 / frames,
+            s.plugins * 1000.0 / frames,
+            s.plugin_tex * 1000.0 / frames,
+            s.particles * 1000.0 / frames,
+            s.widgets * 1000.0 / frames,
+            s.render * 1000.0 / frames,
+            total * 1000.0 / frames,
+            s.max_frame * 1000.0,
+            s.lyric_requests,
+            s.lyric_deduped,
+            s.lyric_stale_results,
+            s.lyric_uploads,
         )
     }
 }
@@ -82,6 +184,7 @@ struct OutputSurfaces {
     configured: bool,
     closed: bool,
     frame_skip: u32,
+    uploaded_texture_revisions: [u64; draw::ATLAS_CAPACITY],
 }
 
 struct App {
@@ -102,24 +205,15 @@ struct App {
     outputs: Vec<OutputSurfaces>,
     image_cache: Vec<(String, std::sync::Arc<ImageData>)>,
     font: std::sync::Arc<rusttype::Font<'static>>,
-    // Per-widget clock cache: (last_text, tex_w, tex_h, tex_index)
-    clock_cache: [(String, u32, u32, u32); 8],
-    texture_slots: Vec<Option<ImageData>>,
-    /// Which texture slots changed this frame and still need a GPU upload.
-    texture_dirty: Vec<bool>,
-    /// True when the cover image changed and every renderer's atlas needs it.
-    cover_dirty: bool,
-    widget_uvs: [(f32, f32, f32, f32); 32],
+    texture_slots: Vec<TextureSlotState>,
     cover_rx: std::sync::mpsc::Receiver<ImageData>,
     last_cover_path: String,
-    cover_tex_index: usize,
     cover_loaded: bool,
     cover_aspect: f32,
-    current_cover: Option<ImageData>,
-    cover_slot: usize,
+    texture_overflow_warned: bool,
+    plugin_overflow_warned: bool,
     lua_state: lua::LuaState,
     plugins: Vec<plugin::LoadedPlugin>,
-    plugin_tex: Vec<Option<(u32, u32, Vec<u8>)>>,
     plugin_smooth_bands: [f32; 128],
     music: lua::MusicInfo,
     ring_amp_smooth: f32,
@@ -140,14 +234,14 @@ struct App {
     lyric_rx: std::sync::mpsc::Receiver<(String, Option<lyrics::LyricData>)>,
     lyric_pos_poll_elapsed: f32,
     /// Per-widget-slot raster cache for lyric banners: (signature, image).
-    lyric_cache: Vec<Option<(String, ImageData)>>,
-    /// Async banner rasteriser: (seq, request) sender / (seq, image) receiver.
-    lyric_raster_tx: std::sync::mpsc::Sender<(u64, LyricRasterReq)>,
-    lyric_raster_rx: std::sync::mpsc::Receiver<(u64, ImageData)>,
+    lyric_cache: Vec<Option<(String, std::sync::Arc<ImageData>)>>,
+    lyric_raster_tx: std::sync::mpsc::Sender<LyricRasterReq>,
+    lyric_raster_rx: std::sync::mpsc::Receiver<LyricRasterResult>,
     lyric_raster_seq: u64,
-    /// In-flight request tags: (seq, widget slot, signature) — results only land if
-    /// the signature is still current, so stale renders are dropped.
-    lyric_raster_pending: Vec<(u64, usize, String)>,
+    /// Latest in-flight request per widget slot: (generation, signature).
+    lyric_raster_pending: Vec<Option<(u64, String)>>,
+    /// Completed worker results awaiting comparison with this frame's desired signature.
+    lyric_raster_ready: Vec<Option<LyricRasterResult>>,
     /// Line-change transition state.
     lyric_cur_idx: i32,
     lyric_line_changed_at: f32,
@@ -222,21 +316,17 @@ fn main() {
         outputs: Vec::new(),
         image_cache: Vec::new(),
         font: std::sync::Arc::new(load_font()),
-        clock_cache: std::array::from_fn(|_| (String::new(), 0, 0, 0)),
-        texture_slots: vec![None; 16],
-        texture_dirty: vec![false; 16],
-        cover_dirty: true,
-        widget_uvs: [(0.0, 0.0, 0.0, 0.0); 32],
+        texture_slots: (0..draw::ATLAS_CAPACITY)
+            .map(|_| TextureSlotState::default())
+            .collect(),
         cover_rx: spawn_cover_thread(),
         last_cover_path: String::new(),
-        cover_tex_index: 0,
         cover_loaded: false,
         cover_aspect: 1.0,
-        current_cover: None,
-        cover_slot: 0,
+        texture_overflow_warned: false,
+        plugin_overflow_warned: false,
         lua_state,
         plugins: plugin::load_plugins_with_log(),
-        plugin_tex: Vec::new(),
         plugin_smooth_bands: [0.0; 128],
         music: lua::MusicInfo::default(),
         ring_amp_smooth: 0.0,
@@ -265,7 +355,8 @@ fn main() {
         lyric_raster_tx,
         lyric_raster_rx,
         lyric_raster_seq: 0,
-        lyric_raster_pending: Vec::new(),
+        lyric_raster_pending: vec![None; 32],
+        lyric_raster_ready: (0..32).map(|_| None).collect(),
         lyric_cur_idx: -1,
         lyric_line_changed_at: 0.0,
         lyric_t_prev: -1000.0,
@@ -362,6 +453,7 @@ impl OutputHandler for App {
             configured: false,
             closed: false,
             frame_skip: 0,
+            uploaded_texture_revisions: [0; draw::ATLAS_CAPACITY],
         });
     }
 
@@ -744,11 +836,12 @@ fn spawn_lyric_thread() -> (
 }
 
 
-/// A lyric banner rasterisation request. Sent to the worker thread; the worker
-/// replies with `(seq, ImageData)`. Keeping rasterisation off the main thread makes
-/// word-level karaoke updates (and the heavier glow/transition rendering) hitch-free.
+/// A versioned lyric banner rasterisation request. The worker coalesces queued
+/// requests per widget slot so rapid seeks cannot build an unbounded render backlog.
 struct LyricRasterReq {
-    seq: u64,
+    generation: u64,
+    slot: usize,
+    signature: String,
     font: std::sync::Arc<rusttype::Font<'static>>,
     prev: Option<String>,
     current: String,
@@ -756,25 +849,52 @@ struct LyricRasterReq {
     style: LyricStyle,
 }
 
+struct LyricRasterResult {
+    generation: u64,
+    slot: usize,
+    signature: String,
+    image: ImageData,
+}
+
 /// Spawn the lyric banner rasteriser worker. Returns (request sender, result receiver).
 fn spawn_lyric_raster_thread() -> (
-    std::sync::mpsc::Sender<(u64, LyricRasterReq)>,
-    std::sync::mpsc::Receiver<(u64, ImageData)>,
+    std::sync::mpsc::Sender<LyricRasterReq>,
+    std::sync::mpsc::Receiver<LyricRasterResult>,
 ) {
-    let (tx, rx) = std::sync::mpsc::channel::<(u64, LyricRasterReq)>();
-    let (res_tx, res_rx) = std::sync::mpsc::channel::<(u64, ImageData)>();
+    let (tx, rx) = std::sync::mpsc::channel::<LyricRasterReq>();
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<LyricRasterResult>();
     std::thread::spawn(move || {
-        while let Ok((seq, req)) = rx.recv() {
-            let img = rasterize_lyric_image(
-                &req.font,
-                req.prev.as_deref(),
-                &req.current,
-                req.next.as_deref(),
-                &req.style,
-            );
-            if let Some(img) = img {
-                if res_tx.send((seq, img)).is_err() {
-                    break;
+        while let Ok(first) = rx.recv() {
+            let mut latest: [Option<LyricRasterReq>; 32] = std::array::from_fn(|_| None);
+            if first.slot < latest.len() {
+                let first_slot = first.slot;
+                latest[first_slot] = Some(first);
+            }
+            while let Ok(req) = rx.try_recv() {
+                if req.slot < latest.len() {
+                    let slot = req.slot;
+                    latest[slot] = Some(req);
+                }
+            }
+            for req in latest.into_iter().flatten() {
+                let img = rasterize_lyric_image(
+                    &req.font,
+                    req.prev.as_deref(),
+                    &req.current,
+                    req.next.as_deref(),
+                    &req.style,
+                )
+                .map(fit_slot);
+                if let Some(image) = img {
+                    let result = LyricRasterResult {
+                        generation: req.generation,
+                        slot: req.slot,
+                        signature: req.signature,
+                        image,
+                    };
+                    if res_tx.send(result).is_err() {
+                        return;
+                    }
                 }
             }
         }
@@ -914,7 +1034,7 @@ fn load_png(path: &str) -> Option<ImageData> {
 
 /// Scale an image down (bilinear-ish) to fit a 1024x1024 atlas slot, keeping aspect.
 fn fit_slot(img: ImageData) -> ImageData {
-    const MAX: u32 = 1024;
+    const MAX: u32 = draw::ATLAS_SLOT_SIZE;
     if img.w <= MAX && img.h <= MAX {
         return img;
     }
@@ -997,6 +1117,7 @@ fn rasterize_text(font: &rusttype::Font, text: &str, size_pt: f32, color: [f32; 
 /// in `active` colour; its first `progress` fraction is overpainted in `karaoke` colour
 /// (a smooth per-word highlight like a karaoke bar). Returns None when there is no text.
 /// Styling for the lyric banner (word karaoke colours).
+#[derive(Clone, Copy)]
 struct LyricStyle {
     font_size: f32,
     /// Unsung words + prev/next base colour.
@@ -1207,14 +1328,97 @@ fn rasterize_lyric_image(
 
 
 impl App {
+    fn texture_slot_matches(&self, slot: usize, key: &str) -> bool {
+        self.texture_slots
+            .get(slot)
+            .is_some_and(|state| state.image.is_some() && state.key == key)
+    }
+
+    fn set_texture_slot(
+        &mut self,
+        slot: usize,
+        key: String,
+        image: std::sync::Arc<ImageData>,
+        kind: TextureKind,
+    ) -> bool {
+        let Some(state) = self.texture_slots.get_mut(slot) else {
+            log::warn!("texture slot {} is outside atlas capacity", slot);
+            return false;
+        };
+        state.update(key, image, kind)
+    }
+
+    fn replace_texture_slot(
+        &mut self,
+        slot: usize,
+        key: String,
+        image: ImageData,
+        kind: TextureKind,
+    ) -> bool {
+        self.set_texture_slot(slot, key, std::sync::Arc::new(image), kind)
+    }
+
+    fn drain_lyric_raster_results(&mut self) {
+        while let Ok(result) = self.lyric_raster_rx.try_recv() {
+            if result.slot >= self.lyric_raster_ready.len() {
+                continue;
+            }
+            let slot = result.slot;
+            if self.lyric_raster_ready[slot].replace(result).is_some() && self.profile_enabled {
+                self.profile.lyric_stale_results += 1;
+            }
+        }
+    }
+
+    fn accept_ready_lyric(&mut self, slot: usize, desired_signature: &str) {
+        let Some(result) = self.lyric_raster_ready[slot].take() else {
+            return;
+        };
+        if lyric_result_is_current(
+            self.lyric_raster_pending[slot].as_ref(),
+            result.generation,
+            &result.signature,
+            desired_signature,
+        ) {
+            self.lyric_cache[slot] = Some((
+                result.signature,
+                std::sync::Arc::new(result.image),
+            ));
+            self.lyric_raster_pending[slot] = None;
+        } else if self.profile_enabled {
+            self.profile.lyric_stale_results += 1;
+        }
+    }
+
     /// Compute widget uniform data (12 f32 each). Returns the 96-float layout.
     /// `widgets` is the per-frame snapshot taken once in compute_scene.
     fn prepare_widgets(&mut self, widgets: &[crate::config::WidgetConfig], min_d: f32) -> [f32; 1280] {
         use crate::config::WidgetType;
         let mut data = [0.0f32; 1280];
-        let mut tex_index = 0u32;
-        // Reserve slot 3 for the album cover (clocks/images use 0..2).
-        self.cover_tex_index = 3;
+        self.drain_lyric_raster_results();
+        while let Ok(img) = self.cover_rx.try_recv() {
+            self.cover_loaded = true;
+            self.cover_aspect = img.h as f32 / img.w as f32;
+            let key = format!(
+                "cover:{}",
+                self.texture_slots[COVER_TEXTURE_SLOT].revision.wrapping_add(1)
+            );
+            self.replace_texture_slot(
+                COVER_TEXTURE_SLOT,
+                key,
+                fit_slot(img),
+                TextureKind::Cover,
+            );
+        }
+        let (texture_layout, texture_overflow) = texture_slot_layout(widgets);
+        if texture_overflow > 0 && !self.texture_overflow_warned {
+            log::warn!(
+                "{} texture-backed widgets exceed the {} general atlas slots and will be hidden",
+                texture_overflow,
+                GENERAL_TEXTURE_SLOTS.len(),
+            );
+            self.texture_overflow_warned = true;
+        }
         for (slot, w) in widgets.iter().enumerate() {
             let o = slot * 40;
             data[o] = match w.widget_type {
@@ -1232,11 +1436,6 @@ impl App {
             data[o + 3] = w.size;
             data[o + 4] = w.alpha;
             data[o + 5] = w.rotate.to_radians();
-            let (cux, cuy, cuw, cuh) = self.widget_uvs[slot];
-            data[o + 7] = cux;
-            data[o + 8] = cuy;
-            data[o + 9] = cuw;
-            data[o + 10] = cuh;
             // ring widget style
             data[o + 12] = match w.shape {
                 crate::config::Shape::Ring => 0.0,
@@ -1285,17 +1484,16 @@ impl App {
             }
             match w.widget_type {
                 WidgetType::Plugin => {
-                    // tex index points at the plugin's render slot (8 + plugin index)
                     let pidx = w
                         .plugin
                         .as_ref()
                         .and_then(|n| self.plugins.iter().position(|p| p.name() == n))
-                        .unwrap_or(0);
-                    let ti = (8 + pidx) as u32;
-                    data[o + 6] = ti as f32;
-                    data[o + 11] = 1.0; // square aspect default; updated when rendered
-                    if tex_index <= ti {
-                        tex_index = ti + 1;
+                        .or_else(|| (!self.plugins.is_empty()).then_some(0));
+                    if let Some(pidx) = pidx.filter(|idx| *idx < MAX_PLUGIN_TEXTURES) {
+                        data[o + 6] = (PLUGIN_TEXTURE_START + pidx) as f32;
+                        data[o + 11] = 1.0;
+                    } else {
+                        data[o + 4] = 0.0;
                     }
                 }
                 WidgetType::Ring => {
@@ -1321,9 +1519,7 @@ impl App {
                     data[o + 21] = (sec / 60.0 * 6.28318530718 - 1.5707963268);
                 }
                 WidgetType::Cover => {
-                    self.cover_slot = slot;
-                    // tex_index points at the cover texture slot (set when loaded).
-                    data[o + 6] = self.cover_tex_index as f32;
+                    data[o + 6] = COVER_TEXTURE_SLOT as f32;
                     // 18=border width, 19=cover growth
                     data[o + 18] = w.border_width.max(0.0);
                     data[o + 19] = w.cover_growth.max(0.0);
@@ -1332,13 +1528,8 @@ impl App {
                     for (ci, ch) in w.color.iter().enumerate() {
                         data[o + 23 + ci] = *ch;
                     }
-                    // Pull the latest cover from the MPRIS thread.
-                    while let Ok(img) = self.cover_rx.try_recv() {
-                        self.cover_loaded = true;
-                        self.cover_aspect = img.h as f32 / img.w as f32;
-                        self.current_cover = Some(img);
-                        self.cover_dirty = true;
-                        log::info!("cover: new cover stored ({}x{})", self.cover_aspect, 0);
+                    if !self.cover_loaded {
+                        data[o + 4] = 0.0;
                     }
                 }
                 WidgetType::Bars => {
@@ -1349,48 +1540,74 @@ impl App {
                     data[o + 21] = w.bar_mirror as u32 as f32;
                 }
                 WidgetType::Image => {
+                    let Some(texture_slot) = texture_layout[slot] else {
+                        data[o + 4] = 0.0;
+                        continue;
+                    };
                     let src = match &w.source {
                         Some(s) => s.clone(),
-                        None => continue,
+                        None => {
+                            data[o + 4] = 0.0;
+                            continue;
+                        }
                     };
-                    let img = self.get_image(&src).cloned();
-                    if let Some(img) = img {
-                        let img = fit_slot(img);
+                    let key = format!("image:{src}");
+                    if !self.texture_slot_matches(texture_slot, &key) {
+                        if let Some(img) = self.get_image(&src) {
+                            self.replace_texture_slot(
+                                texture_slot,
+                                key.clone(),
+                                fit_slot((*img).clone()),
+                                TextureKind::General,
+                            );
+                        }
+                    }
+                    if self.texture_slot_matches(texture_slot, &key) {
+                        let img = self.texture_slots[texture_slot]
+                            .image
+                            .as_ref()
+                            .expect("matching texture slot has an image");
                         let (iw, ih) = (img.w as f32, img.h as f32);
-                        data[o + 6] = tex_index as f32;
+                        data[o + 6] = texture_slot as f32;
                         data[o + 11] = ih / iw; // aspect
-                        self.texture_slots[tex_index as usize] = Some(img);
-                        self.texture_dirty[tex_index as usize] = true;
-                        tex_index += 1;
+                    } else {
+                        data[o + 4] = 0.0;
                     }
                 }
                 WidgetType::Clock => {
+                    let Some(texture_slot) = texture_layout[slot] else {
+                        data[o + 4] = 0.0;
+                        continue;
+                    };
                     let txt = chrono_now();
-                    let (cached_text, cw, ch, cached_tex) = &self.clock_cache[slot];
-                    let (cw, ch) = (*cw, *ch);
-                    let mut ti = *cached_tex;
-                    if &txt != cached_text || cw == 0 {
+                    let key = format!(
+                        "clock:{txt}|{}|{:?}",
+                        w.font_size.to_bits(),
+                        w.color.map(f32::to_bits),
+                    );
+                    if !self.texture_slot_matches(texture_slot, &key) {
                         // 3x supersampling: sharper text when downscaled on screen.
                         let img = fit_slot(rasterize_text(&self.font, &txt, w.font_size * 3.0, w.color));
-                        let (iw, ih) = (img.w, img.h);
-                        ti = tex_index;
-                        self.texture_slots[ti as usize] = Some(img);
-                        self.texture_dirty[ti as usize] = true;
-                        self.clock_cache[slot] = (txt.clone(), iw, ih, ti);
-                        data[o + 11] = ih as f32 / iw as f32;
-                        if ti >= tex_index {
-                            tex_index = ti + 1;
-                        }
-                    } else {
-                        data[o + 11] = ch as f32 / cw as f32;
+                        self.replace_texture_slot(
+                            texture_slot,
+                            key,
+                            img,
+                            TextureKind::General,
+                        );
                     }
-                    data[o + 6] = ti as f32;
+                    if let Some(img) = self.texture_slots[texture_slot].image.as_ref() {
+                        let (iw, ih) = (img.w, img.h);
+                        data[o + 11] = ih as f32 / iw as f32;
+                    } else {
+                        data[o + 4] = 0.0;
+                    }
+                    data[o + 6] = texture_slot as f32;
                 }
                 WidgetType::Lyric => {
-                    // Current song lyric banner. Line-level highlighting: the current
-                    // line is baked fully lit (gold->white gradient + glow), prev/next
-                    // dim. Rasterised ONCE per line on the worker thread — nothing
-                    // re-rasterises while the song plays. No per-frame uniforms.
+                    // Start hidden. It becomes visible only when a valid banner (current
+                    // or same-track stale fallback) is bound, preventing stale UV flashes.
+                    data[o + 4] = 0.0;
+                    let Some(texture_slot) = texture_layout[slot] else { continue };
                     let Some(lt) = self.lyric_time() else { continue };
                     let Some(ldata) = &self.lyric_data else { continue };
                     let Some(ls) = lyrics::line_state(ldata, lt + w.lyric_offset) else { continue };
@@ -1409,17 +1626,17 @@ impl App {
                             }
                         }
                     }
-                    let cur = &ldata.lines[idx].text;
+                    let cur = ldata.lines[idx].text.clone();
                     // Prev/next are the nearest REAL lines (skip empty instrumental gaps).
                     let prev = if w.show_prev_next {
                         lyrics::prev_real_line(&ldata.lines, idx)
-                            .map(|i| ldata.lines[i].text.as_str())
+                            .map(|i| ldata.lines[i].text.clone())
                     } else {
                         None
                     };
                     let next = if w.show_prev_next {
                         lyrics::next_real_line(&ldata.lines, idx)
-                            .map(|i| ldata.lines[i].text.as_str())
+                            .map(|i| ldata.lines[i].text.clone())
                     } else {
                         None
                     };
@@ -1432,76 +1649,112 @@ impl App {
                         show_prev_next: w.show_prev_next,
                     };
                     let sig = format!(
-                        "{slot}|{}|{}|{}|{}|{}|{}",
+                        "{slot}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}",
                         self.lyric_key,
                         cur,
-                        prev.unwrap_or(""),
-                        next.unwrap_or(""),
-                        w.font_size,
+                        prev.as_deref().unwrap_or(""),
+                        next.as_deref().unwrap_or(""),
+                        w.font_size.to_bits(),
                         w.show_prev_next,
+                        style.base.map(f32::to_bits),
+                        style.sung.map(f32::to_bits),
+                        style.cur.map(f32::to_bits),
                     );
-                    // Drain finished renders first (results arrive in order; only the
-                    // newest request per slot stays in `pending`, so applying is safe).
-                    while let Ok((rseq, rimg)) = self.lyric_raster_rx.try_recv() {
-                        if let Some(pos) = self.lyric_raster_pending.iter().position(|(s, _, _)| *s == rseq) {
-                            let (_, rslot, rsig) = self.lyric_raster_pending.remove(pos);
-                            self.lyric_cache[rslot] = Some((rsig, rimg));
+                    self.accept_ready_lyric(slot, &sig);
+                    let cached_signature = self.lyric_cache[slot]
+                        .as_ref()
+                        .map(|(cached_sig, _)| cached_sig.as_str());
+                    let pending_signature = self.lyric_raster_pending[slot]
+                        .as_ref()
+                        .map(|(_, pending_sig)| pending_sig.as_str());
+                    if lyric_request_needed(cached_signature, pending_signature, &sig) {
+                        self.lyric_raster_seq = self.lyric_raster_seq.wrapping_add(1).max(1);
+                        let generation = self.lyric_raster_seq;
+                        let req = LyricRasterReq {
+                            generation,
+                            slot,
+                            signature: sig.clone(),
+                            font: self.font.clone(),
+                            prev,
+                            current: cur,
+                            next,
+                            style,
+                        };
+                        self.lyric_raster_pending[slot] = Some((generation, sig));
+                        if self.lyric_raster_tx.send(req).is_ok() {
+                            if self.profile_enabled {
+                                self.profile.lyric_requests += 1;
+                            }
+                        } else {
+                            self.lyric_raster_pending[slot] = None;
+                        }
+                    } else if cached_signature != Some(sig.as_str()) {
+                        if self.profile_enabled {
+                            self.profile.lyric_deduped += 1;
                         }
                     }
-                    if self.lyric_raster_pending.len() > 8 {
-                        self.lyric_raster_pending.drain(0..4);
-                    }
-                    let rendered: Option<ImageData> = match &self.lyric_cache[slot] {
-                        Some((cs, im)) if *cs == sig => Some(im.clone()),
-                        _ => {
-                            // Cache miss: keep showing the stale banner, request async.
-                            self.lyric_raster_seq += 1;
-                            let seq = self.lyric_raster_seq;
-                            let req = LyricRasterReq {
-                                seq,
-                                font: self.font.clone(),
-                                prev: prev.map(str::to_string),
-                                current: cur.clone(),
-                                next: next.map(str::to_string),
-                                style,
-                            };
-                            let _ = self.lyric_raster_tx.send((seq, req));
-                            // A new request supersedes any older in-flight one for this slot.
-                            self.lyric_raster_pending.retain(|(_, s, _)| *s != slot);
-                            self.lyric_raster_pending.push((seq, slot, sig));
-                            self.lyric_cache[slot].as_ref().map(|(_, im)| im.clone())
-                        }
-                    };
-                    if let Some(img) = rendered {
-                        // Atlas slots are 1024px max — scale the banner down to fit.
-                        let img = fit_slot(img);
+                    let rendered = self.lyric_cache[slot]
+                        .as_ref()
+                        .map(|(cached_sig, img)| (cached_sig.clone(), img.clone()));
+                    if let Some((cached_sig, img)) = rendered {
                         let (iw, ih) = (img.w as f32, img.h as f32);
                         // Render the banner at its NATIVE size: the quad width tracks the
                         // rasterised width, so the text is always `fontSize` on screen.
                         data[o + 3] = (iw / min_d).clamp(0.01, 0.95);
-                        data[o + 6] = tex_index as f32;
+                        data[o + 4] = w.alpha;
+                        data[o + 6] = texture_slot as f32;
                         data[o + 11] = ih / iw;
-                        self.texture_slots[tex_index as usize] = Some(img);
-                        self.texture_dirty[tex_index as usize] = true;
-                        tex_index += 1;
-                    } else {
-                        continue;
+                        self.set_texture_slot(
+                            texture_slot,
+                            cached_sig,
+                            img,
+                            TextureKind::Lyric,
+                        );
                     }
+                }
+            }
+            if matches!(
+                w.widget_type,
+                WidgetType::Image
+                    | WidgetType::Clock
+                    | WidgetType::Cover
+                    | WidgetType::Plugin
+                    | WidgetType::Lyric
+            ) && data[o + 4] > 0.0
+            {
+                let texture_slot = data[o + 6] as usize;
+                let image = self
+                    .texture_slots
+                    .get(texture_slot)
+                    .and_then(|state| state.image.as_ref());
+                if let Some(image) = image {
+                    if let Some((ux, uy, uw, uh)) =
+                        draw::atlas_content_uv(texture_slot, image.w, image.h)
+                    {
+                        data[o + 7] = ux;
+                        data[o + 8] = uy;
+                        data[o + 9] = uw;
+                        data[o + 10] = uh;
+                    } else {
+                        data[o + 4] = 0.0;
+                    }
+                } else {
+                    data[o + 4] = 0.0;
                 }
             }
         }
         data
     }
 
-    fn get_image(&mut self, path: &str) -> Option<&ImageData> {
+    fn get_image(&mut self, path: &str) -> Option<std::sync::Arc<ImageData>> {
         // Simple cache; expand ~ in path.
         let expanded = path.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1);
         if let Some(pos) = self.image_cache.iter().position(|(p, _)| *p == expanded) {
-            return Some(&self.image_cache[pos].1);
+            return Some(self.image_cache[pos].1.clone());
         }
         if let Some(img) = load_png(&expanded) {
             self.image_cache.push((expanded, std::sync::Arc::new(img)));
-            return self.image_cache.last().map(|(_, d)| d.as_ref());
+            return self.image_cache.last().map(|(_, d)| d.clone());
         }
         None
     }
@@ -1520,6 +1773,11 @@ impl App {
         if let Some(t) = title {
             let changed = self.music.title != t;
             if changed {
+                // Never reuse a previous track's banner while the new track is loading.
+                self.lyric_cache.fill(None);
+                self.lyric_raster_pending.fill(None);
+                self.lyric_raster_ready.iter_mut().for_each(|ready| *ready = None);
+                self.lyric_cur_idx = -1;
                 // Track changed: try the local dir + disk cache instantly (no network);
                 // fall back to an async online fetch so lyrics appear without waiting
                 // on a round-trip for songs we have heard before.
@@ -1609,7 +1867,14 @@ impl App {
     /// `type: "plugin"` widgets (each plugin owns slot = 8 + plugin index).
     fn render_plugin_textures(&mut self) {
         let n = self.plugins.len();
-        self.plugin_tex.resize(n, None);
+        if n > MAX_PLUGIN_TEXTURES && !self.plugin_overflow_warned {
+            log::warn!(
+                "{} plugins exceed the {} atlas plugin slots; extras will not render",
+                n,
+                MAX_PLUGIN_TEXTURES,
+            );
+            self.plugin_overflow_warned = true;
+        }
         let (screen_w, screen_h) = self
             .outputs
             .first()
@@ -1620,8 +1885,9 @@ impl App {
         if self.plugin_buf.len() < 512 * 512 * 4 {
             self.plugin_buf.resize(512 * 512 * 4, 0);
         }
-        for (i, p) in self.plugins.iter().enumerate() {
-            let slot = (8 + i) as u32;
+        let mut updates = Vec::new();
+        for (i, p) in self.plugins.iter().take(MAX_PLUGIN_TEXTURES).enumerate() {
+            let slot = (PLUGIN_TEXTURE_START + i) as u32;
             let mut req = plugin::RenderRequest {
                 slot,
                 buf_len: self.plugin_buf.len(),
@@ -1648,16 +1914,14 @@ impl App {
                     rgba.extend_from_slice(&self.plugin_buf[si..si + 4]);
                 }
             }
-            self.plugin_tex[i] = Some((w, h, rgba));
+            updates.push((
+                PLUGIN_TEXTURE_START + i,
+                format!("plugin:{}:{}", p.name(), self.start.elapsed().as_nanos()),
+                ImageData { w, h, rgba },
+            ));
         }
-        // write plugin textures into texture_slots (so prepare_widgets picks them up)
-        for (i, tex) in self.plugin_tex.iter().enumerate() {
-            if let Some((w, h, rgba)) = tex {
-                let ti = 8 + i;
-                let img = ImageData { w: *w, h: *h, rgba: rgba.clone() };
-                self.texture_slots[ti] = Some(img);
-                self.texture_dirty[ti] = true;
-            }
+        for (slot, key, image) in updates {
+            self.replace_texture_slot(slot, key, image, TextureKind::Plugin);
         }
     }
 
@@ -1696,9 +1960,9 @@ impl App {
                 }
             }
         }
-        // Every renderer has now seen this frame's texture changes; reset for the next.
-        self.texture_dirty.fill(false);
-        self.cover_dirty = false;
+        if self.profile_enabled {
+            self.profile.max_frame = self.profile.max_frame.max(t0.elapsed().as_secs_f32());
+        }
         self.profile_maybe_log();
     }
 
@@ -1732,7 +1996,7 @@ impl App {
         }
         self.profile_frames += 1;
         if self.profile_frames % 60 == 0 {
-            log::info!("{}", ProfileStats::format_line(&self.profile));
+            log::info!("{}", ProfileStats::format_line(&self.profile, 60));
             self.profile = ProfileStats::default();
         }
     }
@@ -1841,48 +2105,29 @@ impl App {
             return;
         }
         // Local mutable copy so per-renderer atlas UVs can be patched in.
-        let mut widgets = scene.widgets;
-        let renderer = &mut self.outputs[idx].renderer;
-        // Cover texture: upload only when it changed (multi-monitor safe — each
-        // renderer owns its own atlas, so every output gets the upload once).
-        if self.cover_dirty {
-            if let Some(img) = &self.current_cover {
-                if let Some((ux, uy, uw, uh)) = renderer.upload_texture(self.cover_tex_index, &img.rgba, img.w, img.h) {
-                    log::info!("cover: uploaded slot={} uv=({:.3},{:.3},{:.3},{:.3})", self.cover_slot, ux, uy, uw, uh);
-                    self.widget_uvs[self.cover_slot] = (ux, uy, uw, uh);
-                    // also write into the local widgets array so this frame sees it
-                    let wo = self.cover_slot * 40;
-                    widgets[wo + 7] = ux;
-                    widgets[wo + 8] = uy;
-                    widgets[wo + 9] = uw;
-                    widgets[wo + 10] = uh;
-                }
-            }
-        }
-        // Upload only the texture slots that changed this frame (multi-monitor safe):
-        // each renderer owns its own atlas, so no shared queue that one monitor drains.
-        for (ti, img) in self.texture_slots.iter().enumerate() {
-            if !self.texture_dirty[ti] {
+        let widgets = scene.widgets;
+        let (renderer, uploaded_revisions) = {
+            let output = &mut self.outputs[idx];
+            (&mut output.renderer, &mut output.uploaded_texture_revisions)
+        };
+        let mut lyric_uploads = 0u64;
+        // A renderer uploads a slot only when its local revision lags behind the
+        // application slot. Late-added monitors therefore populate their atlas once.
+        for (ti, state) in self.texture_slots.iter().enumerate() {
+            if !texture_needs_upload(state.revision, uploaded_revisions[ti]) {
                 continue;
             }
-            if let Some(img) = img {
-                if let Some((ux, uy, uw, uh)) = renderer.upload_texture(ti, &img.rgba, img.w, img.h) {
-                    // find the widget slot(s) referencing this texture index
-                    for s in 0..32 {
-                        let wo = s * 40;
-                        if (widgets[wo + 6] - ti as f32).abs() < 0.01 {
-                            if ti >= 8 {
-                                log::info!("plugin tex {} -> widget slot {} uv=({:.3},{:.3},{:.3},{:.3})", ti, s, ux, uy, uw, uh);
-                            }
-                            widgets[wo + 7] = ux;
-                            widgets[wo + 8] = uy;
-                            widgets[wo + 9] = uw;
-                            widgets[wo + 10] = uh;
-                            self.widget_uvs[s] = (ux, uy, uw, uh);
-                        }
+            if let Some(img) = state.image.as_ref() {
+                if renderer.upload_texture(ti, &img.rgba, img.w, img.h).is_some() {
+                    uploaded_revisions[ti] = state.revision;
+                    if state.kind == TextureKind::Lyric {
+                        lyric_uploads += 1;
                     }
                 }
             }
+        }
+        if self.profile_enabled {
+            self.profile.lyric_uploads += lyric_uploads;
         }
         renderer.set_widgets(&widgets);
         let widget_bounds = compute_widget_bounds(&scene.widgets_cfg, width, height);
@@ -1938,7 +2183,7 @@ impl App {
 }
 #[cfg(test)]
 mod tests {
-    use crate::config::{Config, parse_for_test};
+    use crate::config::parse_for_test;
 
     #[test]
     fn parse_widgets_works() {
@@ -1985,10 +2230,78 @@ PulseRing {
         p.particles = 0.005;
         p.widgets = 0.006;
         p.render = 0.007;
-        let s = super::ProfileStats::format_line(&p);
-        assert!(s.contains("pull_audio=1.0ms"), "got: {s}");
-        assert!(s.contains("render=7.0ms"), "got: {s}");
-        assert!(s.contains("total=28.0ms"), "got: {s}");
+        p.max_frame = 0.012;
+        p.lyric_requests = 2;
+        p.lyric_deduped = 3;
+        p.lyric_stale_results = 4;
+        p.lyric_uploads = 5;
+        let s = super::ProfileStats::format_line(&p, 2);
+        assert!(s.contains("pull_audio=0.50ms"), "got: {s}");
+        assert!(s.contains("render=3.50ms"), "got: {s}");
+        assert!(s.contains("total=14.00ms"), "got: {s}");
+        assert!(s.contains("max_frame=12.00ms"), "got: {s}");
+        assert!(s.contains("requests=2,deduped=3,stale=4,uploads=5"), "got: {s}");
+    }
+
+    #[test]
+    fn texture_slot_layout_is_stable_and_bounded() {
+        use crate::config::{WidgetConfig, WidgetType};
+        let mut widgets = Vec::new();
+        for kind in [
+            WidgetType::Image,
+            WidgetType::Clock,
+            WidgetType::Lyric,
+            WidgetType::Image,
+            WidgetType::Clock,
+            WidgetType::Lyric,
+            WidgetType::Image,
+            WidgetType::Clock,
+        ] {
+            let mut widget = WidgetConfig::default();
+            widget.widget_type = kind;
+            widgets.push(widget);
+        }
+        let (layout, overflow) = super::texture_slot_layout(&widgets);
+        assert_eq!(&layout[..7], &[Some(0), Some(1), Some(2), Some(4), Some(5), Some(6), Some(7)]);
+        assert_eq!(layout[7], None);
+        assert_eq!(overflow, 1);
+        assert_eq!(super::COVER_TEXTURE_SLOT, 3);
+        assert_eq!(super::PLUGIN_TEXTURE_START, 8);
+        assert_eq!(super::MAX_PLUGIN_TEXTURES, 8);
+    }
+
+    #[test]
+    fn texture_revisions_change_only_with_content() {
+        let image = std::sync::Arc::new(super::ImageData {
+            w: 1,
+            h: 1,
+            rgba: vec![255, 255, 255, 255],
+        });
+        let mut state = super::TextureSlotState::default();
+        assert!(state.update("a".into(), image.clone(), super::TextureKind::General));
+        let revision = state.revision;
+        assert!(!state.update("a".into(), image.clone(), super::TextureKind::General));
+        assert_eq!(state.revision, revision);
+        assert!(state.update("b".into(), image, super::TextureKind::Lyric));
+        assert!(state.revision > revision);
+        assert!(super::texture_needs_upload(state.revision, 0));
+        assert!(!super::texture_needs_upload(state.revision, state.revision));
+        // A late-added output begins at revision 0 and must upload current content.
+        assert!(super::texture_needs_upload(state.revision, 0));
+    }
+
+    #[test]
+    fn lyric_requests_deduplicate_and_results_are_versioned() {
+        assert!(super::lyric_request_needed(None, None, "line-a"));
+        assert!(!super::lyric_request_needed(None, Some("line-a"), "line-a"));
+        assert!(!super::lyric_request_needed(Some("line-a"), None, "line-a"));
+        assert!(super::lyric_request_needed(Some("line-a"), Some("line-b"), "line-c"));
+
+        let pending = (9u64, "line-b".to_string());
+        assert!(super::lyric_result_is_current(Some(&pending), 9, "line-b", "line-b"));
+        assert!(!super::lyric_result_is_current(Some(&pending), 8, "line-b", "line-b"));
+        assert!(!super::lyric_result_is_current(Some(&pending), 9, "line-b", "line-c"));
+        assert!(!super::lyric_result_is_current(None, 9, "line-b", "line-b"));
     }
 
     #[test]
