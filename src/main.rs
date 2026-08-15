@@ -171,6 +171,7 @@ struct SceneFrame {
     widgets: [f32; 1280],
     bar_energy: [f32; 64],
     overall: f32,
+    band_energy: [f32; 4],
     widgets_cfg: Vec<crate::config::WidgetConfig>,
 }
 
@@ -691,8 +692,23 @@ fn compute_overall_energy(bands: &[f32; NBANDS]) -> f32 {
     acc / 80.0
 }
 
-/// Per-widget conservative bounding radius in pixels, used by the shader to skip
-/// pixels outside each widget's region before running its SDF math.
+/// Precompute the averages used by widget band modes so fragment shaders never
+/// sum dozens of spectrum bins for every covered pixel.
+fn compute_band_energy(bands: &[f32; NBANDS]) -> [f32; 4] {
+    fn mean(values: &[f32]) -> f32 {
+        values.iter().copied().sum::<f32>() / values.len().max(1) as f32
+    }
+
+    [
+        mean(&bands[0..32]),
+        mean(&bands[32..96]),
+        mean(&bands[96..128]),
+        mean(bands),
+    ]
+}
+
+/// Per-widget conservative half-extent in pixels, used by the shader to skip
+/// pixels outside each widget's square before running type-specific math.
 fn compute_widget_bounds(widgets: &[crate::config::WidgetConfig], width: u32, height: u32) -> [f32; 32] {
     use crate::config::WidgetType;
     let mut out = [0.0f32; 32];
@@ -700,7 +716,10 @@ fn compute_widget_bounds(widgets: &[crate::config::WidgetConfig], width: u32, he
     for (i, w) in widgets.iter().take(32).enumerate() {
         let b = match w.widget_type {
             WidgetType::Ring => (w.base_radius + w.growth + w.halo_size + 0.05) * w.size * min_d,
-            WidgetType::Bars => w.size.max(w.bar_height) * min_d * 1.05,
+            WidgetType::Bars => {
+                let half_h = if w.bar_mirror { w.bar_height * 0.5 } else { w.bar_height };
+                (w.size * 0.5).max(half_h) * min_d + 2.0
+            }
             WidgetType::Clock | WidgetType::Analog => (w.size * 0.5 + w.dial_border) * min_d + min_d * 0.01,
             WidgetType::Image | WidgetType::Cover | WidgetType::Lyric => w.size * min_d * 0.75 + (w.border_width + w.cover_growth) * min_d,
             WidgetType::Plugin => w.size * min_d * 0.75,
@@ -2077,6 +2096,7 @@ impl App {
         self.profile_mark("widgets", t_widgets);
         let bar_energy = compute_bar_energy(&render_bands);
         let overall = compute_overall_energy(&render_bands);
+        let band_energy = compute_band_energy(&render_bands);
         SceneFrame {
             render_bands,
             spawn_scale,
@@ -2089,6 +2109,7 @@ impl App {
             widgets,
             bar_energy,
             overall,
+            band_energy,
             widgets_cfg,
         }
     }
@@ -2136,6 +2157,7 @@ impl App {
         renderer.set_auto_rotate(scene.rotate_rad);
         renderer.set_bar_energy(&scene.bar_energy);
         renderer.set_overall_energy(scene.overall);
+        renderer.set_band_energy(&scene.band_energy);
         let pcount = self.cfg.particles.len().min(32) as u32;
         renderer.set_particle_count(pcount);
         // Particle band centre (px): ring base + half growth + halo + typical offset.
@@ -2315,6 +2337,11 @@ PulseRing {
         let ov = super::compute_overall_energy(&bands);
         // 1.0 / 80 over mid bands 16..96
         assert!((ov - 1.0 / 80.0).abs() < 1e-6, "ov={ov}");
+        let energy = super::compute_band_energy(&bands);
+        assert_eq!(energy[0], 0.0);
+        assert!((energy[1] - 1.0 / 64.0).abs() < 1e-6);
+        assert_eq!(energy[2], 0.0);
+        assert!((energy[3] - 1.0 / 128.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2330,6 +2357,14 @@ PulseRing {
         // min_d = 1080; bound = (0.13+0.2+0.12+0.05)*0.2*1080 = 108
         assert!((b[0] - 108.0).abs() < 1.0, "b[0]={}", b[0]);
         assert!(b[1..].iter().all(|&v| v == 0.0));
+
+        let mut bars = WidgetConfig::default();
+        bars.widget_type = WidgetType::Bars;
+        bars.size = 0.55;
+        bars.bar_height = 0.14;
+        let b = super::compute_widget_bounds(&[bars], 1920, 1080);
+        // Half the 594px width plus the 2px AA margin, not the old 624px radius.
+        assert!((b[0] - 299.0).abs() < 1.0, "bars bound={}", b[0]);
     }
 
     #[test]

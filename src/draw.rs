@@ -52,6 +52,7 @@ pub struct RingRenderer {
     widget_count: u32,
     bar_energy_data: [f32; 64],
     overall_energy_data: f32,
+    band_energy_data: [f32; 4],
     particle_count_data: u32,
     particle_band_r_data: f32,
     render_scale: f32,
@@ -127,6 +128,7 @@ struct Uniforms {
     // ---- precomputed bar energies (CPU side) ----
     bar_energy: [f32; 64],
     overall_energy_val: f32,
+    band_energy_values: [f32; 4],
     particle_count: u32,
     particle_band_r: f32,
     widget_bounds: [f32; 32],
@@ -319,6 +321,7 @@ impl RingRenderer {
             widget_count: 0,
             bar_energy_data: [0.0; 64],
             overall_energy_data: 0.0,
+            band_energy_data: [0.0; 4],
             particle_count_data: 0,
             particle_band_r_data: 0.0,
             render_scale: 1.0,
@@ -344,6 +347,11 @@ impl RingRenderer {
     /// Precomputed overall band energy (CPU-side, once per frame).
     pub fn set_overall_energy(&mut self, v: f32) {
         self.overall_energy_data = v;
+    }
+
+    /// Precomputed bass/mid/treble/full averages for widget band modes.
+    pub fn set_band_energy(&mut self, data: &[f32; 4]) {
+        self.band_energy_data = *data;
     }
 
     /// Render resolution scale (0.25..1.0): lower = less GPU, compositor upscales.
@@ -374,7 +382,7 @@ impl RingRenderer {
         self.widget_count = (n / 40) as u32;
     }
 
-    /// Per-widget bounding radii (px), for the shader early-out.
+    /// Per-widget conservative half-extents (px), for the shader early-out.
     pub fn set_widget_bounds(&mut self, data: &[f32; 32]) {
         self.widget_bounds_data = *data;
     }
@@ -613,6 +621,7 @@ impl RingRenderer {
             widgets: self.widget_data,
             bar_energy: self.bar_energy_data,
             overall_energy_val: self.overall_energy_data,
+            band_energy_values: self.band_energy_data,
             particle_count: self.particle_count_data,
             particle_band_r: self.particle_band_r_data,
             widget_bounds: self.widget_bounds_data,
@@ -727,6 +736,7 @@ const SHADER_SRC: &str = stringify!(
         widgets: array<f32, 1280>,
         bar_energy: array<f32, 64>,
         overall_energy_val: f32,
+        band_energy_values: array<f32, 4>,
         particle_count: u32,
         particle_band_r: f32,
         widget_bounds: array<f32, 32>,
@@ -818,6 +828,9 @@ const SHADER_SRC: &str = stringify!(
     // Normalised (radius 1) polar boundary of the configured shape at angle `ang`.
     // Super-ellipse: 1 / (|cos|^n + |sin|^n)^(1/n); petals: multiply by (1 + spike*cos(k*ang)).
     fn shape_radius(ang: f32) -> f32 {
+        if (u.shape == 0u) {
+            return 1.0;
+        }
         let a = ang + u.rotate;
         let sa = sin(a);
         let ca = cos(a);
@@ -848,6 +861,10 @@ const SHADER_SRC: &str = stringify!(
     // Annulus alpha around the polar shape: |dist - edge| < thickness.
     fn shape_ring_a(dist: f32, ang: f32, amp: f32, base: f32, growth: f32, thick: f32) -> f32 {
         let edge = ring_edge(dist, ang, amp, base, growth);
+        return ring_a_from_edge(dist, ang, edge, thick);
+    }
+
+    fn ring_a_from_edge(dist: f32, ang: f32, edge: f32, thick: f32) -> f32 {
         let inside = thick - abs(dist - edge);
         var a = smoothstep(-u.aa, u.aa, inside);
         // Dashed outline: keep a fraction of each angular segment lit.
@@ -885,13 +902,13 @@ const SHADER_SRC: &str = stringify!(
         return shape_ring_a(dist, ang, u.bass, base, u.inner_growth, u.inner_half_thick) * u.inner_alpha;
     }
 
-    // Average magnitude of bands [lo, hi) (lo/hi are u32 band indices).
-    fn band_energy(lo: u32, hi: u32) -> f32 {
-        var acc = 0.0;
-        for (var i = lo; i < hi; i = i + 1u) {
-            acc = acc + u.bands[i];
-        }
-        return acc / f32(max(hi - lo, 1u));
+    // CPU-precomputed averages for widget band modes:
+    // 1=bass, 2=mid, 3=treble, 4=full energy.
+    fn widget_band_energy(mode: f32) -> f32 {
+        if (mode == 1.0) { return u.band_energy_values[0u]; }
+        if (mode == 2.0) { return u.band_energy_values[1u]; }
+        if (mode == 3.0) { return u.band_energy_values[2u]; }
+        return u.band_energy_values[3u];
     }
 
     // Distance from point p to segment [a, b].
@@ -904,6 +921,9 @@ const SHADER_SRC: &str = stringify!(
 
     // Polar boundary radius for a ring widget's own shape (widget data offset `wo`).
     fn widget_shape_r(ang: f32, wshape: f32, wcorners: f32, wspike: f32) -> f32 {
+        if (wshape == 0.0) {
+            return 1.0;
+        }
         let sa = sin(ang);
         let ca = cos(ang);
         var n = 2.0;
@@ -959,7 +979,7 @@ const SHADER_SRC: &str = stringify!(
 
         // Fast reject: pixels far outside the outer ring + halo skip all ring math.
         // (Only particles / widgets / background remain, which are much cheaper.)
-        let ring_max = u.base_r + u.growth + u.halo;
+        let ring_max = u.base_r * (1.0 + u.spikiness) + u.growth + u.halo;
         var ang = 0.0;
         var amp = 0.0;
         var ang_eff = 0.0;
@@ -970,9 +990,10 @@ const SHADER_SRC: &str = stringify!(
         var ring_a = 0.0;
         var halo_a = 0.0;
         var mid_a = 0.0;
+        var inner_a = 0.0;
         var front_a = 0.0;
         var a = 0.0;
-        if (dist <= ring_max * min_d * 1.2 || u.spawn_t < 1.0) {
+        if (dist <= ring_max * 1.2 || u.spawn_t < 1.0) {
             ang = atan2(d.y, d.x);
             if (ang < 0.0) { ang = ang + 6.28318530718; }
             amp = max(idle_amp(), 0.0);
@@ -995,21 +1016,26 @@ const SHADER_SRC: &str = stringify!(
             base_scaled = u.base_r * s_outer;
             mid_base_scaled = u.mid_base_r * s_mid;
             inner_base_scaled = u.inner_base_r * s_inner;
-            edge_out = ring_edge(dist, ang_eff, amp, base_scaled, u.growth);
-            ring_a = shape_ring_a(dist, ang_eff, amp, base_scaled, u.growth, u.half_thick);
+            let shape_r = shape_radius(ang_eff);
+            edge_out = base_scaled * shape_r + amp * u.growth;
+            ring_a = ring_a_from_edge(dist, ang_eff, edge_out, u.half_thick);
             front_a = magic_front(dist, u.base_r, u.spawn_t, 0.0);
             if (dist > edge_out) {
                 let h_t = max(0.0, edge_out + u.halo - dist) / u.halo;
                 halo_a = min(1.0, h_t * amp) * u.halo_strength;
             }
-            mid_a = shape_ring_a(dist, ang_eff, overall_energy(), mid_base_scaled, u.mid_growth, u.mid_half_thick) * f32(u.mid_enabled);
-            a = max(max(max(ring_a, halo_a), mid_a), inner_ring_a_scaled(dist, ang_eff, inner_base_scaled)) * u.alpha;
+            let mid_edge = mid_base_scaled * shape_r + overall_energy() * u.mid_growth;
+            mid_a = ring_a_from_edge(dist, ang_eff, mid_edge, u.mid_half_thick) * f32(u.mid_enabled);
+            let inner_edge = inner_base_scaled * shape_r + u.bass * u.inner_growth;
+            inner_a = ring_a_from_edge(dist, ang_eff, inner_edge, u.inner_half_thick)
+                * f32(u.inner_enabled) * u.inner_alpha;
+            a = max(max(max(ring_a, halo_a), mid_a), inner_a) * u.alpha;
         }
 
         // Middle ring colour.
-        let mid_present = mid_ring_a(dist, ang);
+        let mid_present = mid_a;
         // Inner ring gets its own fixed colour (inner_color) when visible.
-        let inner_present = inner_ring_a_scaled(dist, ang, inner_base_scaled);
+        let inner_present = inner_a;
         var rgb: vec3<f32>;
         if (mid_present > 0.0 && u.mid_color[3] > 0.0) {
             rgb = vec3<f32>(u.mid_color[0], u.mid_color[1], u.mid_color[2]) * u.mid_color[3];
@@ -1118,13 +1144,17 @@ const SHADER_SRC: &str = stringify!(
             }
             let wpos = vec2<f32>(wx, wy) * u.resolution;
             let wd = in.pos.xy - wpos;
-            let wdist = length(wd);
-            // Early-out: pixels outside this widget's conservative bounding circle skip
-            // all widget SDF math (widgets are small; most pixels are far away).
-            if (wdist > u.widget_bounds[wi]) {
+            let widget_bound = u.widget_bounds[wi];
+            // A square reject avoids a sqrt for the overwhelming majority of pixels.
+            // Radial widgets perform their exact circle test inside their own branch.
+            if (abs(wd.x) > widget_bound || abs(wd.y) > widget_bound) {
                 continue;
             }
             if (wtype == 0.0) {
+                let wdist = length(wd);
+                if (wdist > widget_bound) {
+                    continue;
+                }
                 // Ring widget: fully independent style from its own uniform fields.
                 let wshape = u.widgets[wo + 12u];
                 let wcorners = u.widgets[wo + 13u];
@@ -1143,10 +1173,7 @@ const SHADER_SRC: &str = stringify!(
                 // Frequency response per bandMode:
                 //   0=full (angle-mapped), 1=bass, 2=mid, 3=treble, 4=energy
                 var wamp = band_amp(wang);
-                if (wband == 1.0) { wamp = band_energy(0u, 32u); }
-                else if (wband == 2.0) { wamp = band_energy(32u, 96u); }
-                else if (wband == 3.0) { wamp = band_energy(96u, 128u); }
-                else if (wband == 4.0) { wamp = band_energy(0u, 128u); }
+                if (wband >= 1.0) { wamp = widget_band_energy(wband); }
                 // shape radius with widget's own shape params
                 let wr = widget_shape_r(wang, wshape, wcorners, wspike);
                 let wedge = wbase * wr + wamp * wgrowth;
@@ -1192,12 +1219,6 @@ const SHADER_SRC: &str = stringify!(
                 let wband = u.widgets[wo + 39u];
                 let wcmode = u.widgets[wo + 15u];
                 let total_w = wsize * min_d;
-                // frequency window for this widget's bandMode
-                var f_lo = 0.0;
-                var f_hi = 128.0;
-                if (wband == 1.0) { f_hi = 32.0; }
-                else if (wband == 2.0) { f_lo = 32.0; f_hi = 96.0; }
-                else if (wband == 3.0) { f_lo = 96.0; }
                 let step = total_w / f32(bn);
                 let bar_w = step * (1.0 - bgap * 0.8);
                 let x0 = wpos.x - total_w * 0.5;
@@ -1207,11 +1228,18 @@ const SHADER_SRC: &str = stringify!(
                 if (wband == 1.0) { f_span = 32u; }
                 else if (wband == 2.0) { f_base = 32u; f_span = 64u; }
                 else if (wband == 3.0) { f_base = 96u; f_span = 32u; }
-                for (var bi = 0u; bi < bn; bi = bi + 1u) {
-                    // bar centre starts half a bar in so the gaps are symmetric (visual centre
-                    // stays at wpos.x).
+                var inside_y = false;
+                if (bmirror > 0.5) {
+                    inside_y = abs(wd.y) <= bmax_h * 0.5 + 1.2;
+                } else {
+                    inside_y = wd.y <= 1.2 && wd.y >= -bmax_h - 1.2;
+                }
+                if (inside_y && in.pos.x >= x0 - 1.2 && in.pos.x <= x0 + total_w + 1.2) {
+                    // Bars never overlap their neighbour, so x identifies the only bar that
+                    // can contribute to this pixel. This replaces the old per-pixel O(n) loop.
+                    let local_x = in.pos.x - x0;
+                    let bi = min(u32(clamp(floor(local_x / step), 0.0, f32(bn - 1u))), bn - 1u);
                     let bx = x0 + bar_w * 0.5 + f32(bi) * step;
-                    // lookup energy (no per-pixel band loop)
                     let eidx = u32(f32(f_base) + f32(f_span) * (f32(bi) / f32(bn))) % 64u;
                     let e = u.bar_energy[eidx];
                     let bh = e * bmax_h;
@@ -1248,6 +1276,10 @@ const SHADER_SRC: &str = stringify!(
                     }
                 }
             } else if (wtype == 5.0) {
+                let wdist = length(wd);
+                if (wdist > widget_bound) {
+                    continue;
+                }
                 // Analog clock: fully vector-rendered with anti-aliased SDF (no pixel jaggies).
                 let hangle = u.widgets[wo + 19u];
                 let mangle = u.widgets[wo + 20u];
@@ -1268,8 +1300,12 @@ const SHADER_SRC: &str = stringify!(
                         w_col += hcol.rgb * hcol.a * walpha * bord;
                         w_a += hcol.a * walpha * bord;
                     }
-                    // ticks: minute + hour, drawn as radial rectangles with AA edges
-                    for (var tk = 0u; tk < 60u; tk = tk + 1u) {
+                    // Ticks do not overlap, so the pixel angle identifies the only one that
+                    // can contribute. Keep the same 60 minute/hour marks without a 60-step loop.
+                    if (wdist >= radius * 0.70 && wdist <= radius * 0.98) {
+                        var tick_angle = atan2(wd.y, wd.x);
+                        if (tick_angle < 0.0) { tick_angle = tick_angle + 6.28318530718; }
+                        let tk = u32(round(tick_angle / 6.28318530718 * 60.0)) % 60u;
                         let ta = f32(tk) / 60.0 * 6.28318530718;
                         let major = (tk % 5u == 0u);
                         let dir = vec2<f32>(cos(ta), sin(ta));
@@ -1329,10 +1365,7 @@ const SHADER_SRC: &str = stringify!(
                 let wgrowth = u.widgets[wo + 19u];
                 let wborder = u.widgets[wo + 18u] * min_d;
                 // band energy for beat-scaling
-                var bamp = band_energy(0u, 128u);
-                if (wband == 1.0) { bamp = band_energy(0u, 32u); }
-                else if (wband == 2.0) { bamp = band_energy(32u, 96u); }
-                else if (wband == 3.0) { bamp = band_energy(96u, 128u); }
+                let bamp = widget_band_energy(wband);
                 let scale = 1.0 + bamp * wgrowth;
                 let half = vec2<f32>(wsize * min_d * scale, wsize * min_d * scale * aspect) * 0.5;
                 // border colour from widget palette slot 0
