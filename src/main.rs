@@ -960,7 +960,18 @@ fn load_image_path(path: &str) -> Option<ImageData> {
     let img = image::load_from_memory(&bytes).ok()?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
-    let img = ImageData { w, h, rgba: rgba.into_raw() };
+    // Album art is often rectangular; the cover widget shows a SQUARE (center-crop),
+    // so crop to a centred square here instead of letting the quad stretch to the
+    // full rectangle aspect.
+    let side = w.min(h);
+    let rgba = if side < w || side < h {
+        let x0 = (w - side) / 2;
+        let y0 = (h - side) / 2;
+        image::imageops::crop_imm(&rgba, x0, y0, side, side).to_image()
+    } else {
+        rgba
+    };
+    let img = ImageData { w: side, h: side, rgba: rgba.into_raw() };
     Some(fit_slot(img))
 }
 
