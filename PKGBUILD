@@ -1,6 +1,6 @@
 # Maintainer: MEKCCK <MEKCCK@users.noreply.github.com>
 pkgname=pulse-ring
-pkgver=0.1.0
+pkgver=d442ea4
 pkgrel=1
 pkgdesc="Wayland 壁纸层上的音乐律动可视化（GPU 渲染 + QML 样式 + Lua 行为）"
 arch=('x86_64')

@@ -1,6 +1,0 @@
-<RCC>
-  <qresource prefix="/">
-    <file alias="Main.qml">/home/elite/Projects/pulse-ring/tools/qt-panel/Main.qml</file>
-  </qresource>
-</RCC>
-
