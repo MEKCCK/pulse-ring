@@ -5,6 +5,30 @@ use wgpu::wgt::CompositeAlphaMode;
 
 use crate::audio::NBANDS;
 
+pub const ATLAS_SLOT_SIZE: u32 = 1024;
+pub const ATLAS_GRID: u32 = 4;
+pub const ATLAS_CAPACITY: usize = (ATLAS_GRID * ATLAS_GRID) as usize;
+
+pub(crate) fn atlas_content_uv(index: usize, w: u32, h: u32) -> Option<(f32, f32, f32, f32)> {
+    if index >= ATLAS_CAPACITY
+        || w == 0
+        || h == 0
+        || w > ATLAS_SLOT_SIZE
+        || h > ATLAS_SLOT_SIZE
+    {
+        return None;
+    }
+    let atlas_size = (ATLAS_SLOT_SIZE * ATLAS_GRID) as f32;
+    let col = (index as u32 % ATLAS_GRID) as f32;
+    let row = (index as u32 / ATLAS_GRID) as f32;
+    Some((
+        col * ATLAS_SLOT_SIZE as f32 / atlas_size,
+        row * ATLAS_SLOT_SIZE as f32 / atlas_size,
+        w as f32 / atlas_size,
+        h as f32 / atlas_size,
+    ))
+}
+
 /// GPU renderer for the pulsing ring. Owns the wgpu surface/pipeline and a uniform buffer
 /// holding the latest 128 band magnitudes. CPU work per frame: a small buffer write + one draw.
 /// All ring geometry / shading is computed in the fragment shader.
@@ -34,6 +58,7 @@ pub struct RingRenderer {
     widget_bounds_data: [f32; 32],
     atlas_texture: Option<wgpu::Texture>,
     atlas_view: Option<wgpu::TextureView>,
+    atlas_rejection_warned: std::collections::HashSet<usize>,
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -300,6 +325,7 @@ impl RingRenderer {
             widget_bounds_data: [0.0; 32],
             atlas_texture: None,
             atlas_view: None,
+            atlas_rejection_warned: std::collections::HashSet::new(),
             sampler: sampler.clone(),
             bind_group_layout: bind_group_layout.clone(),
         }
@@ -367,16 +393,24 @@ impl RingRenderer {
         }
     }
 
-    /// Upload an RGBA image into atlas slot `index` (each slot is 1024x1024 in a 2x2 grid).
+    /// Upload an RGBA image into atlas slot `index` (each slot is 1024x1024 in a 4x4 grid).
     /// Returns the actual content UV rect (x, y, w, h) in atlas coordinates, or None.
     pub fn upload_texture(&mut self, index: usize, rgba: &[u8], w: u32, h: u32) -> Option<(f32, f32, f32, f32)> {
-        const SLOT: u32 = 1024;
-        const GRID: u32 = 2;
-        if index >= 64 || w == 0 || h == 0 || w > SLOT || h > SLOT {
+        let Some(uv) = atlas_content_uv(index, w, h) else {
+            if self.atlas_rejection_warned.insert(index) {
+                log::warn!(
+                    "atlas upload rejected: slot={} size={}x{} capacity={} max_size={}",
+                    index,
+                    w,
+                    h,
+                    ATLAS_CAPACITY,
+                    ATLAS_SLOT_SIZE,
+                );
+            }
             return None;
-        }
-        let atlas_w = SLOT * GRID;
-        let atlas_h = SLOT * GRID;
+        };
+        let atlas_w = ATLAS_SLOT_SIZE * ATLAS_GRID;
+        let atlas_h = ATLAS_SLOT_SIZE * ATLAS_GRID;
         if self.atlas_texture.is_none() {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("widget atlas"),
@@ -394,8 +428,8 @@ impl RingRenderer {
             self.refresh_texture_bindings();
         }
         let tex = self.atlas_texture.as_ref().unwrap();
-        let col = (index as u32 % GRID) * SLOT;
-        let row = (index as u32 / GRID) * SLOT;
+        let col = (index as u32 % ATLAS_GRID) * ATLAS_SLOT_SIZE;
+        let row = (index as u32 / ATLAS_GRID) * ATLAS_SLOT_SIZE;
         let dst = wgpu::TexelCopyTextureInfo {
             texture: tex,
             mip_level: 0,
@@ -404,23 +438,12 @@ impl RingRenderer {
         };
         let layout = wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) };
         self.queue.write_texture(dst, rgba, layout, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
-        let aw = atlas_w as f32;
-        let ah = atlas_h as f32;
-        let col = (index as u32 % GRID) as f32;
-        let row = (index as u32 / GRID) as f32;
-        Some((
-            col * SLOT as f32 / aw,
-            row * SLOT as f32 / ah,
-            w as f32 / aw,
-            h as f32 / ah,
-        ))
+        Some(uv)
     }
 
     /// Atlas UV rect (x, y, w, h) for a slot, in 0..1.
-    pub fn atlas_uv(index: usize) -> (f32, f32, f32, f32) {
-        const SLOT: f32 = 1024.0;
-        let x = index as f32 * SLOT;
-        (x / (SLOT * 4.0), 0.0, 1.0 / 4.0, 1.0)
+    pub fn atlas_uv(index: usize) -> Option<(f32, f32, f32, f32)> {
+        atlas_content_uv(index, ATLAS_SLOT_SIZE, ATLAS_SLOT_SIZE)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1392,3 +1415,30 @@ const SHADER_SRC: &str = stringify!(
         return vec4<f32>(col * alpha, alpha);
     }
 );
+
+#[cfg(test)]
+mod atlas_tests {
+    use super::{atlas_content_uv, RingRenderer, ATLAS_CAPACITY, ATLAS_GRID, ATLAS_SLOT_SIZE};
+
+    #[test]
+    fn atlas_uvs_cover_all_valid_grid_edges() {
+        let atlas_size = (ATLAS_GRID * ATLAS_SLOT_SIZE) as f32;
+        for index in [0usize, 3, 4, 15] {
+            let uv = RingRenderer::atlas_uv(index).expect("valid atlas slot");
+            assert!(uv.0 >= 0.0 && uv.1 >= 0.0);
+            assert!(uv.0 + uv.2 <= 1.0);
+            assert!(uv.1 + uv.3 <= 1.0);
+            assert_eq!(uv.2, ATLAS_SLOT_SIZE as f32 / atlas_size);
+            assert_eq!(uv.3, ATLAS_SLOT_SIZE as f32 / atlas_size);
+        }
+        assert!(RingRenderer::atlas_uv(ATLAS_CAPACITY).is_none());
+    }
+
+    #[test]
+    fn atlas_rejects_invalid_content_bounds() {
+        assert!(atlas_content_uv(ATLAS_CAPACITY, 1, 1).is_none());
+        assert!(atlas_content_uv(0, 0, 1).is_none());
+        assert!(atlas_content_uv(0, ATLAS_SLOT_SIZE + 1, 1).is_none());
+        assert!(atlas_content_uv(15, 640, 128).is_some());
+    }
+}
