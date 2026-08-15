@@ -2,6 +2,10 @@
 // pulse-ring 日常配置 —— Material Design 3 风格
 // ============================================================
 PulseRing {
+    // 图片壁纸（壁纸引擎基础功能；留空 = 透明显示系统壁纸）
+    // imageWallpaper: "~/Pictures/壁纸.jpg"
+    // imageWallpaperMode: "cover"   // cover=裁剪铺满 / contain=完整显示 / stretch=拉伸
+
     // Lua 脚本（动态控制/自定义算法）
     luaScript: "~/.config/pulse-ring/pulse-ring.lua"
 

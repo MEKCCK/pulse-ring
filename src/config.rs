@@ -261,6 +261,17 @@ impl Default for ParticleConfig {
     }
 }
 
+/// How the wallpaper image is fitted to the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallpaperMode {
+    /// Crop to fill the screen (default).
+    Cover,
+    /// Fit the whole image (letterboxed with bars).
+    Contain,
+    /// Stretch to the screen.
+    Stretch,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     // ---- shape ----
@@ -310,6 +321,11 @@ pub struct Config {
     pub mid_color: [f32; 4],
     // ---- particles ----
     pub particle_shape: ParticleShape,
+    // ---- wallpaper ----
+    /// Optional image wallpaper path (empty = transparent, compositor wallpaper shows).
+    pub image_wallpaper: Option<String>,
+    /// How the wallpaper image fits the screen.
+    pub image_wallpaper_mode: WallpaperMode,
     // ---- lua ----
     /// Optional Lua script path; the script can transform bands, tweak config and widgets
     /// at runtime via `onUpdate`, `transformBands`, etc.
@@ -383,6 +399,8 @@ impl Default for Config {
             particle_mode: ParticleMode::Burst,
             particle_loop: true,
             particles: vec![],
+            image_wallpaper: None,
+            image_wallpaper_mode: WallpaperMode::Cover,
             color_mode: ColorMode::Gradient,
             colors: vec![
                 [0.404, 0.314, 0.643, 1.0], // MD3 Primary #6750A4
@@ -923,6 +941,20 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
                         }
                     }
                 }
+            }
+        }
+        "imageWallpaper" => {
+            if let Val::Str(s) = v {
+                cfg.image_wallpaper = Some(s.clone());
+            }
+        }
+        "imageWallpaperMode" => {
+            if let Val::Str(s) = v {
+                cfg.image_wallpaper_mode = match s.to_ascii_lowercase().as_str() {
+                    "contain" => WallpaperMode::Contain,
+                    "stretch" => WallpaperMode::Stretch,
+                    _ => WallpaperMode::Cover,
+                };
             }
         }
         _ => {

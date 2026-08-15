@@ -62,6 +62,12 @@ pub struct RingRenderer {
     atlas_rejection_warned: std::collections::HashSet<usize>,
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Full-screen wallpaper texture (image wallpaper mode), behind everything.
+    wallpaper_texture: Option<wgpu::Texture>,
+    wallpaper_view: Option<wgpu::TextureView>,
+    /// 1x1 transparent view used when no wallpaper is configured (transparent base).
+    wallpaper_placeholder_view: wgpu::TextureView,
+    wallpaper_mode: u32,
 }
 
 /// Shader uniforms. Matches `struct Uniforms` in ring.wgsl.
@@ -132,6 +138,7 @@ struct Uniforms {
     particle_count: u32,
     particle_band_r: f32,
     widget_bounds: [f32; 32],
+    wallpaper_mode: u32,
 }
 
 impl RingRenderer {
@@ -181,9 +188,12 @@ impl RingRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
         });
 
-        const UNIFORM_SIZE: u64 = std::mem::size_of::<Uniforms>() as u64;
+        // Round up to 16 bytes so the buffer always covers the WGSL struct's own
+        // storage-buffer alignment/size (WGSL can be a few bytes larger than Rust's
+        // repr(C) size). The shader reads the whole struct through this binding.
+        const UNIFORM_SIZE: u64 = ((std::mem::size_of::<Uniforms>() as u64 + 15) / 16) * 16;
         assert!(
-            UNIFORM_SIZE <= 10832 + 128,
+            UNIFORM_SIZE <= 10832 + 256,
             "uniform struct grew beyond reserved buffer: {UNIFORM_SIZE}"
         );
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -222,6 +232,16 @@ impl RingRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -246,6 +266,17 @@ impl RingRenderer {
             view_formats: &[],
         });
         let placeholder_view = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+        let wp_placeholder = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("wp placeholder"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let wp_placeholder_view = wp_placeholder.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ring bg"),
@@ -262,6 +293,10 @@ impl RingRenderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&wp_placeholder_view),
                 },
             ],
         });
@@ -331,6 +366,10 @@ impl RingRenderer {
             atlas_rejection_warned: std::collections::HashSet::new(),
             sampler: sampler.clone(),
             bind_group_layout: bind_group_layout.clone(),
+            wallpaper_texture: None,
+            wallpaper_view: None,
+            wallpaper_placeholder_view: wp_placeholder_view.clone(),
+            wallpaper_mode: 0,
         }
     }
 
@@ -389,6 +428,7 @@ impl RingRenderer {
 
     fn refresh_texture_bindings(&mut self) {
         if let Some(view) = &self.atlas_view {
+            let wp_view = self.wallpaper_view.as_ref();
             self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ring bg"),
                 layout: &self.bind_group_layout,
@@ -396,9 +436,57 @@ impl RingRenderer {
                     wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wp_view.map_or(
+                            wgpu::BindingResource::TextureView(&self.wallpaper_placeholder_view),
+                            wgpu::BindingResource::TextureView,
+                        ),
+                    },
                 ],
             });
         }
+    }
+
+    /// Upload (or replace) the full-screen wallpaper texture.
+    pub fn upload_wallpaper(&mut self, rgba: &[u8], w: u32, h: u32) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("wallpaper"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.wallpaper_texture = Some(tex);
+        self.wallpaper_view = Some(view);
+        self.refresh_texture_bindings();
+    }
+
+    /// Wallpaper fit mode: 0 = cover (crop), 1 = contain (letterbox), 2 = stretch.
+    pub fn set_wallpaper_mode(&mut self, mode: u32) {
+        self.wallpaper_mode = mode;
     }
 
     /// Upload an RGBA image into atlas slot `index` (each slot is 1024x1024 in a 4x4 grid).
@@ -625,6 +713,7 @@ impl RingRenderer {
             particle_count: self.particle_count_data,
             particle_band_r: self.particle_band_r_data,
             widget_bounds: self.widget_bounds_data,
+            wallpaper_mode: self.wallpaper_mode,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -740,10 +829,12 @@ const SHADER_SRC: &str = stringify!(
         particle_count: u32,
         particle_band_r: f32,
         widget_bounds: array<f32, 32>,
+        wallpaper_mode: u32,
     };
 
     @group(0) @binding(1) var widget_texture: texture_2d<f32>;
     @group(0) @binding(2) var widget_sampler: sampler;
+    @group(0) @binding(3) var wallpaper_tex: texture_2d<f32>;
 
     @group(0) @binding(0) var<storage, read> u: Uniforms;
 
@@ -1442,10 +1533,44 @@ const SHADER_SRC: &str = stringify!(
         let base_col = mix(rgb * a, sat_col, sat_a / max(a + sat_a, 0.0001)) * (a + sat_a);
         let col = base_col + front_col + p_col * (1.0 - ring_alpha) + w_col;
         let alpha = a + sat_a + front_alpha + pa * (1.0 - min(a + sat_a, 1.0)) + wa * (1.0 - min(a + sat_a, 1.0));
-        if (alpha <= 0.004) {
+
+        // Wallpaper background (image wallpaper mode) sits UNDER everything: where the
+        // ring/widget alpha is 0 the wallpaper shows through; when no wallpaper is set
+        // the 1x1 transparent placeholder keeps the old transparent behaviour.
+        let img_dims = vec2<f32>(textureDimensions(wallpaper_tex));
+        var wp_uv = in.pos.xy / u.resolution;
+        if (u.wallpaper_mode == 0u) {
+            // cover: crop to fill the screen
+            let scr_a = u.resolution.x / u.resolution.y;
+            let img_a = img_dims.x / img_dims.y;
+            if (img_a > scr_a) {
+                let s = scr_a / img_a;
+                wp_uv.y = wp_uv.y * s + 0.5 * (1.0 - s);
+            } else {
+                let s = img_a / scr_a;
+                wp_uv.x = wp_uv.x * s + 0.5 * (1.0 - s);
+            }
+        } else if (u.wallpaper_mode == 1u) {
+            // contain: fit the whole image (letterboxed)
+            let scr_a = u.resolution.x / u.resolution.y;
+            let img_a = img_dims.x / img_dims.y;
+            if (img_a > scr_a) {
+                let s = img_a / scr_a;
+                wp_uv.x = wp_uv.x * s + 0.5 * (1.0 - s);
+            } else {
+                let s = scr_a / img_a;
+                wp_uv.y = wp_uv.y * s + 0.5 * (1.0 - s);
+            }
+        }
+        // stretch: uv unchanged
+        let wc = textureSample(wallpaper_tex, widget_sampler, wp_uv);
+        let uncovered = 1.0 - min(alpha, 1.0);
+        let out_a = min(alpha, 1.0) + wc.a * uncovered;
+        let out_col = col * min(alpha, 1.0) + wc.rgb * wc.a * uncovered;
+        if (out_a <= 0.004) {
             return vec4<f32>(0.0, 0.0, 0.0, 0.0);
         }
-        return vec4<f32>(col * alpha, alpha);
+        return vec4<f32>(out_col, out_a);
     }
 );
 

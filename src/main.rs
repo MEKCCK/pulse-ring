@@ -211,6 +211,10 @@ struct App {
     last_cover_path: String,
     cover_loaded: bool,
     cover_aspect: f32,
+    /// Full-screen image wallpaper (behind everything). None = transparent.
+    wallpaper_image: Option<ImageData>,
+    /// Set when the wallpaper changed and every renderer's texture needs an upload.
+    wallpaper_dirty: bool,
     texture_overflow_warned: bool,
     plugin_overflow_warned: bool,
     lua_state: lua::LuaState,
@@ -300,6 +304,9 @@ fn main() {
     let (lyric_tx, lyric_rx) = spawn_lyric_thread();
     let (lyric_raster_tx, lyric_raster_rx) = spawn_lyric_raster_thread();
     let music_rx = spawn_music_thread();
+    // Image wallpaper: load once at startup (None = transparent / compositor wallpaper).
+    let wallpaper_image = cfg.image_wallpaper.as_deref().and_then(load_image_raw);
+    let wallpaper_dirty = cfg.image_wallpaper.is_some();
     let mut app = App {
         compositor,
         layer_shell,
@@ -324,6 +331,8 @@ fn main() {
         last_cover_path: String::new(),
         cover_loaded: false,
         cover_aspect: 1.0,
+        wallpaper_image,
+        wallpaper_dirty,
         texture_overflow_warned: false,
         plugin_overflow_warned: false,
         lua_state,
@@ -954,25 +963,33 @@ fn spawn_cover_thread() -> std::sync::mpsc::Receiver<ImageData> {
 }
 
 /// Decode a PNG or JPEG file into RGBA (scaled to fit 256 slot).
-fn load_image_path(path: &str) -> Option<ImageData> {
+/// Decode an image file to RGBA keeping the original aspect (no crop / no resize).
+fn load_image_raw(path: &str) -> Option<ImageData> {
     let expanded = path.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1);
     let bytes = std::fs::read(&expanded).ok()?;
     let img = image::load_from_memory(&bytes).ok()?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
-    // Album art is often rectangular; the cover widget shows a SQUARE (center-crop),
-    // so crop to a centred square here instead of letting the quad stretch to the
-    // full rectangle aspect.
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(ImageData { w, h, rgba: rgba.into_raw() })
+}
+
+/// Cover art loader: decode then centre-crop to a square (album art is often
+/// rectangular; the cover widget shows a SQUARE, so crop here instead of stretching).
+fn load_image_path(path: &str) -> Option<ImageData> {
+    let img = load_image_raw(path)?;
+    let (w, h) = (img.w, img.h);
     let side = w.min(h);
     let rgba = if side < w || side < h {
         let x0 = (w - side) / 2;
         let y0 = (h - side) / 2;
-        image::imageops::crop_imm(&rgba, x0, y0, side, side).to_image()
+        image::imageops::crop_imm(&image::RgbaImage::from_raw(w, h, img.rgba)?, x0, y0, side, side).to_image()
     } else {
-        rgba
+        image::RgbaImage::from_raw(w, h, img.rgba)?
     };
-    let img = ImageData { w: side, h: side, rgba: rgba.into_raw() };
-    Some(fit_slot(img))
+    Some(fit_slot(ImageData { w: side, h: side, rgba: rgba.into_raw() }))
 }
 
 /// Current local time as two lines: "HH:MM\nMM-DD" (libc localtime_r, system timezone).
@@ -1990,6 +2007,8 @@ impl App {
                 }
             }
         }
+        // Every renderer has seen the wallpaper this frame; clear the change flag.
+        self.wallpaper_dirty = false;
         if self.profile_enabled {
             self.profile.max_frame = self.profile.max_frame.max(t0.elapsed().as_secs_f32());
         }
@@ -2160,6 +2179,18 @@ impl App {
         }
         if self.profile_enabled {
             self.profile.lyric_uploads += lyric_uploads;
+        }
+        // Image wallpaper: upload once per change to each renderer (behind everything).
+        if self.wallpaper_dirty {
+            if let Some(img) = &self.wallpaper_image {
+                renderer.upload_wallpaper(&img.rgba, img.w, img.h);
+                log::info!("wallpaper: uploaded {}x{} to output {}", img.w, img.h, idx);
+            }
+            renderer.set_wallpaper_mode(match self.cfg.image_wallpaper_mode {
+                crate::config::WallpaperMode::Contain => 1,
+                crate::config::WallpaperMode::Stretch => 2,
+                _ => 0,
+            });
         }
         renderer.set_widgets(&widgets);
         let widget_bounds = compute_widget_bounds(&scene.widgets_cfg, width, height);
@@ -2449,4 +2480,6 @@ PulseRing {
         assert!(lit > 40, "current line should have many fully-lit pixels, got {lit}");
         assert!(dim > 0, "prev/next dim pixels expected");
     }
+
 }
+

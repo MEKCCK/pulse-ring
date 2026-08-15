@@ -51,6 +51,8 @@ fn try_start_audio(sensitivity: f32, decay: f32) -> anyhow::Result<Receiver<[f32
                     stream = None;
                     log::info!("audio: (re)starting capture on {current_sink:?}");
                     stream = restart_capture(sensitivity, decay, &mags_tx);
+                    // Keep the live stream bound so it is dropped on the next switch.
+                    let _ = &stream;
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
