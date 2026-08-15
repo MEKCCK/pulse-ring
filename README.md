@@ -121,13 +121,16 @@ my-wallpaper/
 └── assets/...            # 任意引用资源（HTML 相对路径直接引用）
 ```
 ```json
-{ "type": "scene", "title": "我的壁纸", "file": "index.html",
+{ "type": "image", "title": "我的壁纸",
+  "images": ["img-1.jpg", "img-2.jpg", "img-3.jpg"],
+  "interval": 60, "transition": 2, "transitionEffect": "fade",
   "qml": "style.qml", "lua": "behavior.lua",
-  "params": { "particles": 80, "baseHue": 262 } }
+  "params": { "baseHue": 262 } }
 ```
 - 安装到壁纸库：`pulse-ring --install-wallpaper my-wallpaper/` → `~/.config/pulse-ring/wallpapers/my-wallpaper/`
 - 配置按名字引用：`wallpapers: ["my-wallpaper"]` / `sceneWallpaper: "my-wallpaper"` / `imageWallpaper: "my-wallpaper"`
-- `type`: `web`/`scene`（HTML）、`video`（视频）、`image`（图片)
+- `type`: `web`/`scene`（HTML）、`video`（视频）、`image`（图片）
+- **壁纸包能力 ≥ 全局**（包激活时覆盖全局设置）：`images`（多图轮换，无需 `file`）、`interval`（轮换间隔）、`transition`（过渡时长）、`transitionEffect`（50 种过渡效果）、`audio`（视频声音）
 - `qml`/`lua`：激活该壁纸时应用专属样式与行为
 - `params` 通过 `window.pulseRing.onConfig()` 传给页面
 
