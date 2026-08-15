@@ -3,7 +3,7 @@ use cpal::{BufferSize, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Preferred sample rate / channel count for the capture stream. PipeWire's "pipewire" ALSA device
 /// advertises absurd ranges (1 Hz..384000 Hz, 1..32 ch); we pin sane values so the FFT band mapping
@@ -32,18 +32,70 @@ pub fn start_audio(sensitivity: f32, decay: f32) -> Receiver<[f32; NBANDS]> {
 }
 
 fn try_start_audio(sensitivity: f32, decay: f32) -> anyhow::Result<Receiver<[f32; NBANDS]>> {
-    // On PipeWire+ALSA, point cpal at the default sink's monitor so we react to real playback
-    // rather than a microphone. We resolve the monitor node id with `pactl`/`pw-dump` lazily;
-    // if that fails we fall back to whatever default input device cpal picks.
+    let (mags_tx, mags_rx) = bounded::<[f32; NBANDS]>(4);
+    // One dedicated audio thread owns the capture Stream (cpal::Stream is !Send, so it
+    // must live on a single thread). Every 2s it checks the default sink and — when it
+    // changes (speakers / headphones / BT / HDMI) — drops the old stream and rebuilds
+    // capture on the new sink's monitor, so the ring/bars keep reacting to playback.
+    std::thread::Builder::new()
+        .name("pulse-ring-audio".into())
+        .spawn(move || {
+            let mut current_sink: Option<String> = None;
+            let mut stream: Option<Stream> = None;
+            loop {
+                let sink = get_default_sink();
+                if current_sink.is_none() || (sink.is_some() && sink != current_sink) {
+                    current_sink = sink;
+                    // Drop the old stream (stops capture; its FFT thread exits when the
+                    // old frame channel closes), then build a fresh one on the new node.
+                    stream = None;
+                    log::info!("audio: (re)starting capture on {current_sink:?}");
+                    stream = restart_capture(sensitivity, decay, &mags_tx);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        })?;
+    Ok(mags_rx)
+}
+
+/// Current default sink name (via pactl), or None when pactl is unavailable.
+fn get_default_sink() -> Option<String> {
+    let out = std::process::Command::new("pactl").arg("get-default-sink").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Build a capture stream on the current default sink's monitor and run an FFT loop
+/// feeding `mags_tx`. Returns the live Stream (owned by the audio thread) or None.
+fn restart_capture(
+    sensitivity: f32,
+    decay: f32,
+    mags_tx: &Sender<[f32; NBANDS]>,
+) -> Option<Stream> {
+    // On PipeWire+ALSA, point cpal at the default sink's monitor so we react to real
+    // playback rather than a microphone. Resolved with `pactl` lazily each restart.
     ensure_pipewire_monitor_node();
 
     let host = cpal::default_host();
-    let device = pick_device(&host)?;
+    let device = match pick_device(&host) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("audio: no capture device ({e})");
+            return None;
+        }
+    };
     log::info!("audio device: {}", device.name().unwrap_or_default());
 
-    let mut cfgs = device.supported_input_configs()?.collect::<Vec<_>>();
+    let mut cfgs = match device.supported_input_configs() {
+        Ok(c) => c.collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
     if cfgs.is_empty() {
-        anyhow::bail!("device has no supported input configs");
+        log::warn!("audio: device has no supported input configs");
+        return None;
     }
     // Pick the config closest to our target: F32, 2 channels, 48 kHz.
     fn score(c: &cpal::SupportedStreamConfigRange) -> i64 {
@@ -75,13 +127,16 @@ fn try_start_audio(sensitivity: f32, decay: f32) -> anyhow::Result<Receiver<[f32
     let channels = cfg.channels as usize;
 
     let stream: Stream = match sample_format {
-        SampleFormat::F32 => device.build_input_stream(
+        SampleFormat::F32 => match device.build_input_stream(
             &cfg,
             move |data: &[f32], _| push_chunk(data, channels, &frame_tx),
             |e| log::error!("audio stream error: {e}"),
             None,
-        )?,
-        SampleFormat::I16 => device.build_input_stream(
+        ) {
+            Ok(s) => s,
+            Err(e) => { log::warn!("audio: build F32 stream failed ({e})"); return None; }
+        },
+        SampleFormat::I16 => match device.build_input_stream(
             &cfg,
             move |data: &[i16], _| {
                 let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
@@ -89,8 +144,11 @@ fn try_start_audio(sensitivity: f32, decay: f32) -> anyhow::Result<Receiver<[f32
             },
             |e| log::error!("audio stream error: {e}"),
             None,
-        )?,
-        SampleFormat::U16 => device.build_input_stream(
+        ) {
+            Ok(s) => s,
+            Err(e) => { log::warn!("audio: build I16 stream failed ({e})"); return None; }
+        },
+        SampleFormat::U16 => match device.build_input_stream(
             &cfg,
             move |data: &[u16], _| {
                 let f: Vec<f32> = data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
@@ -98,18 +156,23 @@ fn try_start_audio(sensitivity: f32, decay: f32) -> anyhow::Result<Receiver<[f32
             },
             |e| log::error!("audio stream error: {e}"),
             None,
-        )?,
-        other => anyhow::bail!("unsupported sample format {other:?}"),
+        ) {
+            Ok(s) => s,
+            Err(e) => { log::warn!("audio: build U16 stream failed ({e})"); return None; }
+        },
+        other => { log::warn!("audio: unsupported format {other:?}"); return None; }
     };
-    stream.play()?;
-    std::mem::forget(stream);
+    if let Err(e) = stream.play() {
+        log::warn!("audio: stream.play failed ({e})");
+        return None;
+    }
 
-    let (mags_tx, mags_rx) = bounded::<[f32; NBANDS]>(4);
+    let mags = mags_tx.clone();
     std::thread::Builder::new()
         .name("pulse-ring-fft".into())
-        .spawn(move || fft_loop(frame_rx, mags_tx, cfg.sample_rate.0, sensitivity, decay))?;
-
-    Ok(mags_rx)
+        .spawn(move || fft_loop(frame_rx, mags, cfg.sample_rate.0, sensitivity, decay))
+        .ok();
+    Some(stream)
 }
 
 fn push_chunk(data: &[f32], channels: usize, frame_tx: &Sender<Vec<f32>>) {
@@ -151,24 +214,33 @@ fn ensure_pipewire_monitor_node() {
         _ => return,
     };
     let monitor_name = format!("{sink}.monitor");
-    for line in out.lines() {
-        let mut it = line.split_whitespace();
-        let id = it.next();
-        let name = it.next();
-        if let (Some(id), Some(name)) = (id, name) {
-            if name == monitor_name || name.ends_with(".monitor") {
-                if let Ok(n) = id.parse::<u32>() {
-                    // SAFETY: this runs single-threaded at startup before any other thread that
-                    // might read the environment is spawned.
-                    unsafe {
-                        std::env::set_var("PIPEWIRE_NODE", n.to_string());
-                        std::env::set_var("PIPEWIRE_LATENCY", "1024/48000");
+    let find = |want_exact: bool| -> Option<u32> {
+        for line in out.lines() {
+            let mut it = line.split_whitespace();
+            let id = it.next();
+            let name = it.next();
+            if let (Some(id), Some(name)) = (id, name) {
+                let ok = if want_exact { name == monitor_name } else { name.ends_with(".monitor") };
+                if ok {
+                    if let Ok(n) = id.parse::<u32>() {
+                        return Some(n);
                     }
-                    log::info!("set PIPEWIRE_NODE={n} ({name})");
-                    return;
                 }
             }
         }
+        None
+    };
+    // Prefer the EXACT default-sink monitor (speakers vs headphones matter!). Only when
+    // that is missing fall back to any monitor device.
+    let node = find(true).or_else(|| find(false));
+    if let Some(n) = node {
+        // SAFETY: called from the audio thread before opening the device; PipeWire reads
+        // these env vars when cpal opens the capture node.
+        unsafe {
+            std::env::set_var("PIPEWIRE_NODE", n.to_string());
+            std::env::set_var("PIPEWIRE_LATENCY", "1024/48000");
+        }
+        log::info!("set PIPEWIRE_NODE={n} ({monitor_name})");
     }
 }
 
