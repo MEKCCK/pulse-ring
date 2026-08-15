@@ -68,6 +68,10 @@ pub struct RingRenderer {
     /// Full-screen wallpaper texture (image wallpaper mode), behind everything.
     wallpaper_texture: Option<wgpu::Texture>,
     wallpaper_view: Option<wgpu::TextureView>,
+    /// Previous wallpaper (the one being faded out during a transition).
+    wallpaper_prev_texture: Option<wgpu::Texture>,
+    wallpaper_prev_view: Option<wgpu::TextureView>,
+    wallpaper_progress: f32,
     /// 1x1 transparent view used when no wallpaper is configured (transparent base).
     wallpaper_placeholder_view: wgpu::TextureView,
     wallpaper_mode: u32,
@@ -142,6 +146,7 @@ struct Uniforms {
     particle_band_r: f32,
     widget_bounds: [f32; 32],
     wallpaper_mode: u32,
+    wallpaper_progress: f32,
 }
 
 impl RingRenderer {
@@ -245,6 +250,16 @@ impl RingRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -300,6 +315,10 @@ impl RingRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&wp_placeholder_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: wgpu::BindingResource::TextureView(&wp_placeholder_view),
                 },
             ],
@@ -374,8 +393,11 @@ impl RingRenderer {
             mipmap_layout: None,
             wallpaper_texture: None,
             wallpaper_view: None,
+            wallpaper_prev_texture: None,
+            wallpaper_prev_view: None,
             wallpaper_placeholder_view: wp_placeholder_view.clone(),
             wallpaper_mode: 0,
+            wallpaper_progress: 1.0,
         }
     }
 
@@ -449,6 +471,13 @@ impl RingRenderer {
                             wgpu::BindingResource::TextureView,
                         ),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.wallpaper_prev_view.as_ref().map_or(
+                            wgpu::BindingResource::TextureView(&self.wallpaper_placeholder_view),
+                            wgpu::BindingResource::TextureView,
+                        ),
+                    },
                 ],
             });
         }
@@ -490,10 +519,28 @@ impl RingRenderer {
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+        // Promote the current wallpaper to "previous" so a transition can crossfade
+        // from the old image to the new one.
+        if self.wallpaper_texture.is_some() && self.wallpaper_progress >= 0.99 {
+            self.wallpaper_prev_texture = self.wallpaper_texture.take();
+            self.wallpaper_prev_view = self.wallpaper_view.take();
+            self.wallpaper_progress = 0.0;
+        }
         self.wallpaper_texture = Some(tex);
         self.wallpaper_view = Some(view);
         self.generate_mipmaps();
         self.refresh_texture_bindings();
+    }
+
+    /// Transition progress 0..1 between the previous and current wallpaper.
+    pub fn set_wallpaper_progress(&mut self, p: f32) {
+        self.wallpaper_progress = p.clamp(0.0, 1.0);
+        // Once fully shown, the previous texture is no longer needed.
+        if self.wallpaper_progress >= 1.0 {
+            self.wallpaper_prev_texture = None;
+            self.wallpaper_prev_view = None;
+            self.refresh_texture_bindings();
+        }
     }
 
     /// Blit each wallpaper mip level from the previous one (box-ish downsample via the
@@ -901,6 +948,7 @@ impl RingRenderer {
             particle_band_r: self.particle_band_r_data,
             widget_bounds: self.widget_bounds_data,
             wallpaper_mode: self.wallpaper_mode,
+            wallpaper_progress: self.wallpaper_progress,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -1017,11 +1065,13 @@ const SHADER_SRC: &str = stringify!(
         particle_band_r: f32,
         widget_bounds: array<f32, 32>,
         wallpaper_mode: u32,
+        wallpaper_progress: f32,
     };
 
     @group(0) @binding(1) var widget_texture: texture_2d<f32>;
     @group(0) @binding(2) var widget_sampler: sampler;
     @group(0) @binding(3) var wallpaper_tex: texture_2d<f32>;
+    @group(0) @binding(4) var wallpaper_prev_tex: texture_2d<f32>;
 
     @group(0) @binding(0) var<storage, read> u: Uniforms;
 
@@ -1750,7 +1800,19 @@ const SHADER_SRC: &str = stringify!(
             }
         }
         // stretch: uv unchanged
-        let wc = textureSample(wallpaper_tex, widget_sampler, wp_uv);
+        // Transition between the previous and current wallpaper: crossfade + a gentle
+        // zoom-out of the incoming image (ease in-out on the progress).
+        let t = u.wallpaper_progress * u.wallpaper_progress * (3.0 - 2.0 * u.wallpaper_progress);
+        var prev_uv = wp_uv;
+        var cur_uv = wp_uv;
+        if (t < 1.0) {
+            // Incoming image scales 1.06 -> 1.0, outgoing stays put (crossfade blend).
+            let zoom = 1.0 + 0.06 * (1.0 - t);
+            cur_uv = (cur_uv - 0.5) * zoom + 0.5;
+        }
+        var wc = textureSample(wallpaper_prev_tex, widget_sampler, prev_uv);
+        let wc_new = textureSample(wallpaper_tex, widget_sampler, cur_uv);
+        wc = mix(wc, wc_new, t);
         let uncovered = 1.0 - min(alpha, 1.0);
         let out_a = min(alpha, 1.0) + wc.a * uncovered;
         let out_col = col * min(alpha, 1.0) + wc.rgb * wc.a * uncovered;

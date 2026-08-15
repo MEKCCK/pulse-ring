@@ -328,6 +328,12 @@ pub struct Config {
     pub image_wallpaper_mode: WallpaperMode,
     /// Optional video wallpaper path (takes precedence over imageWallpaper).
     pub video_wallpaper: Option<String>,
+    /// Rotating image wallpaper list (each entry is a path); empty = no rotation.
+    pub wallpapers: Vec<String>,
+    /// Seconds between wallpaper rotations (only used with `wallpapers`).
+    pub wallpaper_interval: f32,
+    /// Seconds for the crossfade/zoom transition between wallpapers.
+    pub wallpaper_transition: f32,
     // ---- lua ----
     /// Optional Lua script path; the script can transform bands, tweak config and widgets
     /// at runtime via `onUpdate`, `transformBands`, etc.
@@ -404,6 +410,9 @@ impl Default for Config {
             image_wallpaper: None,
             image_wallpaper_mode: WallpaperMode::Cover,
             video_wallpaper: None,
+            wallpapers: Vec::new(),
+            wallpaper_interval: 30.0,
+            wallpaper_transition: 1.2,
             color_mode: ColorMode::Gradient,
             colors: vec![
                 [0.404, 0.314, 0.643, 1.0], // MD3 Primary #6750A4
@@ -956,6 +965,18 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
                 cfg.video_wallpaper = Some(s.clone());
             }
         }
+        "wallpapers" => {
+            if let Val::Arr(items) = v {
+                cfg.wallpapers.clear();
+                for it in items {
+                    if let Val::Str(s) = it {
+                        cfg.wallpapers.push(s.clone());
+                    }
+                }
+            }
+        }
+        "wallpaperInterval" => cfg.wallpaper_interval = num(v).unwrap_or(30.0).max(5.0),
+        "wallpaperTransition" => cfg.wallpaper_transition = num(v).unwrap_or(1.2).max(0.1),
         "imageWallpaperMode" => {
             if let Val::Str(s) = v {
                 cfg.image_wallpaper_mode = match s.to_ascii_lowercase().as_str() {

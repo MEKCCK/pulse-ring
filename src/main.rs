@@ -220,6 +220,12 @@ struct App {
     video_rx: Option<std::sync::mpsc::Receiver<video_wallpaper::VideoFrame>>,
     /// Only log the first wallpaper upload (video re-uploads every frame).
     log_once_wallpaper: bool,
+    /// Rotation state: wallpaper list, current index, switch/transition timers.
+    wallpaper_list: Vec<String>,
+    wallpaper_idx: usize,
+    wallpaper_switch_at: f32,
+    wallpaper_transition_start: f32,
+    wallpaper_progress: f32,
     texture_overflow_warned: bool,
     plugin_overflow_warned: bool,
     lua_state: lua::LuaState,
@@ -309,9 +315,14 @@ fn main() {
     let (lyric_tx, lyric_rx) = spawn_lyric_thread();
     let (lyric_raster_tx, lyric_raster_rx) = spawn_lyric_raster_thread();
     let music_rx = spawn_music_thread();
+    let wallpaper_list = cfg.wallpapers.clone();
     // Image wallpaper: load once at startup (None = transparent / compositor wallpaper).
-    let wallpaper_image = cfg.image_wallpaper.as_deref().and_then(load_image_raw);
-    let wallpaper_dirty = cfg.image_wallpaper.is_some();
+    let wallpaper_image = if !wallpaper_list.is_empty() {
+        cfg.wallpapers.first().and_then(|p| load_image_raw(p))
+    } else {
+        cfg.image_wallpaper.as_deref().and_then(load_image_raw)
+    };
+    let wallpaper_dirty = wallpaper_image.is_some();
     // Video wallpaper takes precedence over the static image.
     let video_rx = match &cfg.video_wallpaper {
         Some(vpath) if cfg.image_wallpaper.is_none() || vpath.is_empty() => {
@@ -356,6 +367,11 @@ fn main() {
         wallpaper_dirty,
         video_rx,
         log_once_wallpaper: true,
+        wallpaper_list,
+        wallpaper_idx: 0,
+        wallpaper_switch_at: 0.0,
+        wallpaper_transition_start: 0.0,
+        wallpaper_progress: 1.0,
         texture_overflow_warned: false,
         plugin_overflow_warned: false,
         lua_state,
@@ -2030,6 +2046,7 @@ impl App {
                 self.wallpaper_dirty = true;
             }
         }
+        self.tick_wallpaper_rotation();
         let scene = self.compute_scene();
         // With an image wallpaper configured, every monitor shows it (wallpaper-engine
         // behaviour) — render all outputs regardless of the renderScreen visualisation cap.
@@ -2052,6 +2069,32 @@ impl App {
             self.profile.max_frame = self.profile.max_frame.max(t0.elapsed().as_secs_f32());
         }
         self.profile_maybe_log();
+    }
+
+    /// Advance the rotating-wallpaper transition and switch to the next image when the
+    /// interval elapses. Video wallpaper bypasses rotation (holds progress at 1.0).
+    fn tick_wallpaper_rotation(&mut self) {
+        if self.video_rx.is_some() || self.wallpaper_list.is_empty() {
+            self.wallpaper_progress = 1.0;
+            return;
+        }
+        let elapsed = self.start.elapsed().as_secs_f32();
+        let dur = self.cfg.wallpaper_transition.max(0.1);
+        if self.wallpaper_switch_at == 0.0 {
+            self.wallpaper_switch_at = elapsed + self.cfg.wallpaper_interval;
+        }
+        let mut progress = ((elapsed - self.wallpaper_transition_start) / dur).clamp(0.0, 1.0);
+        if progress >= 1.0 && elapsed >= self.wallpaper_switch_at {
+            self.wallpaper_idx = (self.wallpaper_idx + 1) % self.wallpaper_list.len();
+            if let Some(img) = load_image_raw(&self.wallpaper_list[self.wallpaper_idx]) {
+                self.wallpaper_image = Some(img);
+                self.wallpaper_dirty = true;
+            }
+            self.wallpaper_transition_start = elapsed;
+            self.wallpaper_switch_at = elapsed + self.cfg.wallpaper_interval;
+            progress = 0.0;
+        }
+        self.wallpaper_progress = progress;
     }
 
     fn pull_audio(&mut self) {
@@ -2220,6 +2263,7 @@ impl App {
             self.profile.lyric_uploads += lyric_uploads;
         }
         // Image wallpaper: upload once per change to each renderer (behind everything).
+        renderer.set_wallpaper_progress(self.wallpaper_progress);
         if self.wallpaper_dirty {
             if let Some(img) = &self.wallpaper_image {
                 if self.video_rx.is_some() {
