@@ -75,10 +75,23 @@ ApplicationWindow {
         } catch (e) { return "image"; }
     }
 
+    function packNameOf(ref) {
+        // "Jade-Feet" → "Jade-Feet"；绝对路径 → 取最后一段目录名
+        var s = String(ref).replace(/"/g, "").trim();
+        if (s === "") return "";
+        return s.split("/").pop();
+    }
     Component.onCompleted: {
-        currentWallpaper = win.fieldValue("imageWallpaper", "").replace(/"/g, "")
-            || win.fieldValue("sceneWallpaper", "").replace(/"/g, "")
-            || win.fieldValue("webWallpaper", "").replace(/"/g, "");
+        currentWallpaper = packNameOf(win.fieldValue("imageWallpaper", ""))
+            || packNameOf(win.fieldValue("sceneWallpaper", ""))
+            || packNameOf(win.fieldValue("webWallpaper", ""));
+        // 轮换列表引用包名时也高亮（wallpapers: ["Jade-Feet", ...]）
+        if (currentWallpaper === "") {
+            try {
+                var arr = JSON.parse(win.fieldValue("wallpapers", "[]"));
+                if (arr && arr.length > 0) currentWallpaper = packNameOf(arr[0]);
+            } catch (e) {}
+        }
         var dirs = FileIO.listDir(win.wallpaperDir);
         for (var i = 0; i < dirs.length; i++) {
             var d = dirs[i];
