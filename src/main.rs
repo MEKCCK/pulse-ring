@@ -284,6 +284,28 @@ struct App {
 fn main() {
     env_logger::init();
 
+    // `pulse-ring --install-wallpaper <folder>`：把壁纸打包成文件夹安装到壁纸库
+    // (~/.config/pulse-ring/wallpapers/<name>/)，之后配置里按名字引用即可。
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--install-wallpaper") {
+        if let Some(src) = args.get(pos + 1) {
+            match install_wallpaper_pack(src) {
+                Ok(name) => {
+                    println!("installed wallpaper pack '{name}'");
+                    println!("use it via: wallpapers: [\"{name}\"]  or  sceneWallpaper: \"{name}\"");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("install failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            eprintln!("usage: pulse-ring --install-wallpaper <folder-with-project.json>");
+            std::process::exit(1);
+        }
+    }
+
     let mut cfg = config::Config::load(&config::config_path());
     let audio_rx = audio::start_audio(cfg.sensitivity, cfg.decay);
 
@@ -1478,9 +1500,57 @@ fn rasterize_lyric_image(
 }
 
 
+/// Copy a wallpaper folder (with project.json) into the wallpaper library.
+fn install_wallpaper_pack(src: &str) -> Result<String, String> {
+    let src_path = std::path::Path::new(src);
+    if !src_path.is_dir() {
+        return Err(format!("'{src}' is not a folder"));
+    }
+    if !src_path.join("project.json").is_file() {
+        return Err("folder must contain project.json".to_string());
+    }
+    let name = src_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or("invalid folder name")?;
+    let lib = wallpaper_pack::library_dir();
+    std::fs::create_dir_all(&lib).map_err(|e| e.to_string())?;
+    let dst = lib.join(&name);
+    if dst.exists() {
+        std::fs::remove_dir_all(&dst).map_err(|e| e.to_string())?;
+    }
+    copy_dir(src_path, &dst).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
+/// Recursive directory copy (no extra deps).
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 fn resolve_wallpaper(
     path: &str,
 ) -> (String, String, String) {
+    // 壁纸库：裸名字或相对路径先查 ~/.config/pulse-ring/wallpapers/<name>
+    let resolved_path = if std::path::Path::new(path).is_absolute() || std::path::Path::new(path).exists() {
+        path.to_string()
+    } else {
+        wallpaper_pack::resolve_library_path(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string())
+    };
+    let path = resolved_path.as_str();
     if let Some(pack) = wallpaper_pack::resolve_pack(path) {
         let kind = pack.spec.kind.to_ascii_lowercase();
         let kind = if kind == "video" { "video" } else if kind == "image" { "image" } else { "web" };

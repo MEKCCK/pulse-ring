@@ -34,6 +34,27 @@ pub struct ResolvedWallpaper {
     pub params_json: String,
 }
 
+/// Wallpaper library directory: `$XDG_CONFIG_HOME/pulse-ring/wallpapers/<name>/`.
+pub fn library_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".config"))
+        .join("pulse-ring")
+        .join("wallpapers")
+}
+
+/// Resolve a wallpaper name to the library folder if it exists there.
+/// `name` may be a bare folder name ("my-wallpaper") or a relative path.
+pub fn resolve_library_path(name: &str) -> Option<std::path::PathBuf> {
+    let p = library_dir().join(name);
+    if p.is_dir() && p.join("project.json").is_file() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
 /// If `path` is a directory containing `project.json`, resolve it to a wallpaper
 /// spec + resource file. Returns None when it's not a packaged wallpaper.
 pub fn resolve_pack(path: &str) -> Option<ResolvedWallpaper> {
