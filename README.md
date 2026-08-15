@@ -15,6 +15,7 @@ Wayland 壁纸层上的音乐律动可视化（GPU 渲染，wgpu/Vulkan）。
 │  ├─ 音频：PipeWire monitor → FFT → 128 频段  │
 │  ├─ 配置：QML 解析 → Config                 │
 │  ├─ 渲染：wgpu (Vulkan) → wl-layer-shell    │
+│  ├─ 壁纸：图片/视频/轮播 + 50 种 GLSL 过渡  │
 │  └─ Widgets：时钟/封面/频谱/圆环/粒子/歌词   │
 └─────────────────────────────────────────────┘
 ```
@@ -28,8 +29,8 @@ Wayland 壁纸层上的音乐律动可视化（GPU 渲染，wgpu/Vulkan）。
 - **形状系统**：ring / square / diamond / hexagon / triangle / star / flower，旋转、虚线
 - **星环效果**：连续半透明环带 + 粒子环绕
 - **Widgets**：模拟时钟、数字时钟、专辑封面（MPRIS 实时）、条形频谱（含镜像）、独立圆环、**歌词（LRC 逐字卡拉OK）**，自由放置
-- **图片壁纸**：`imageWallpaper` 指定图片，`imageWallpaperMode` 选 cover/contain/stretch，完整 mipmap 链缩放不闪烁（壁纸引擎基础功能）
-- **歌词**：本地 `~/.config/pulse-ring/lyrics/*.lrc` 优先，自动回退在线获取（Lrclib）并缓存；跟随 MPRIS 播放进度，当前行高亮 + 逐字卡拉OK着色 + 上一/下一行预览
+- **壁纸引擎**：静态图片（`imageWallpaper`，cover/contain/stretch + 完整 mipmap 链）、视频壁纸（GStreamer 硬件解码，音频可选）、多壁纸轮播（图片/视频混排）、**50+ 种 GLSL 切换动画**（fade/circleopen/crosszoom/glitchmemories…，`wallpaperTransitionEffect` 可选）
+- **歌词**：本地 `~/.config/pulse-ring/lyrics/*.lrc` 优先，在线回退 QQ 音乐 → Lrclib（时长校验防错歌）并缓存；跟随 MPRIS 播放进度，行级点亮高亮 + 上一/下一行预览
 - **魔法阵启动动画**：三层环波浪展开 + 旋转 + 前沿光环
 - **Lua 插件**：`onUpdate` / `transformBands` / `pulse.*` API，动态控制一切
 - **多显示器**：每台独立渲染
@@ -76,12 +77,27 @@ PulseRing {
 }
 ```
 
+**壁纸配置**（壁纸引擎）：
+```qml
+imageWallpaper: "~/Pictures/壁纸.jpg"       // 静态图片（留空=透明）
+imageWallpaperMode: "cover"                 // cover/contain/stretch
+videoWallpaper: "~/Videos/壁纸.mp4"         // 视频壁纸（优先级高于图片）
+videoWallpaperAudio: true                   // 视频壁纸是否出声
+wallpapers: [                              // 轮播列表（图片/视频可混排）
+    "~/Pictures/壁纸.jpg",
+    "~/Videos/壁纸.mp4"
+]
+wallpaperInterval: 10                       // 轮换间隔（秒）
+wallpaperTransition: 1.5                    // 过渡时长（秒）
+wallpaperTransitionEffect: "crosszoom"      // 50+ 种过渡效果之一
+```
+
 **歌词来源**（按优先级）：
 1. 本地文件 `~/.config/pulse-ring/lyrics/<标题>.lrc` 或 `<歌手> - <标题>.lrc`
 2. 缓存 `~/.cache/pulse-ring/lyrics/`（在线获取成功后自动保存）
-3. 在线获取：Lrclib（`https://lrclib.net`），按 MPRIS 的标题/歌手自动匹配
+3. 在线获取：QQ 音乐（时长校验防错歌）→ Lrclib，按 MPRIS 的标题/歌手自动匹配
 
-**歌词 widget 参数**：`fontSize`（当前行字号）、`color`（上一/下一行颜色）、`colors[0]`（当前行）、`colors[1]`（卡拉OK进度色）、`showPrevNext`（是否显示上一/下一行）。
+**歌词 widget 参数**：`fontSize`（当前行字号）、`color`（上一/下一行颜色）、`colors[0/1/2]`（当前行渐变：起始/中间/高光色）、`showPrevNext`（是否显示上一/下一行）。
 
 ```lua
 -- ~/.config/pulse-ring/pulse-ring.lua —— 动态行为
@@ -96,11 +112,6 @@ function transformBands(bands) ... end
 
 `pkill pulse-ring`
 
-## 已知限制 / Known Limitations
-
-- **渲染管线仍不完善，性能尚有提升空间**：当前采用单全屏三角形 + 巨型 fragment shader（所有效果逐像素 SDF 计算）的架构，复杂配置（多 widget、粒子、魔法阵启动动画）在低端 GPU 上开销较大；粒子计算 GPU 化等优化尚未完成。
-- 歌词逐帧光栅化已在后台线程执行，但首次加载/换歌时需等待网络获取（可放本地 LRC 或依赖磁盘缓存即时命中）。
-
 ## 许可证
 
 AGPL-3.0-only © MEKCCK，详见 [LICENSE](LICENSE)。
@@ -111,8 +122,9 @@ AGPL-3.0-only © MEKCCK，详见 [LICENSE](LICENSE)。
 
 - **[Folia](https://github.com/chthollyphile/folia-major)**（AGPL-3.0）—— 歌词管线（LRC 解析、逐字着色、行级高亮）、主题与视觉设计参考
 - **[SPlayer](https://github.com/SPlayer-Dev/SPlayer)**（AGPL-3.0）—— 网络歌词多源获取、时长匹配校验、歌词元数据/署名行过滤思路
+- **[Kaleidux](https://github.com/Mjoyufull/Kaleidux)**（AGPL-3.0）—— 壁纸引擎：视频壁纸（GStreamer playbin/appsink）、50+ GLSL 切换动画库（gl-transitions）、mipmap 生成思路
 
-pulse-ring 采用 **AGPL-3.0-only**（与所参考项目 Folia/SPlayer 的 AGPL-3.0-only 完全对齐；兼容原 GPL-3.0 条款）；引用来源均以概念/思路形式再实现于 Rust，未直接复制其代码。
+pulse-ring 采用 **AGPL-3.0-only**（与所参考项目 Folia/SPlayer/Kaleidux 的 AGPL-3.0-only 完全对齐；兼容原 GPL-3.0 条款）；引用来源均以概念/思路形式再实现于 Rust，未直接复制其代码。
 
 ## 性能 / 帧率
 
