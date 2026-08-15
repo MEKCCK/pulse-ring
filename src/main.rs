@@ -355,10 +355,21 @@ fn main() {
     let (lyric_tx, lyric_rx) = spawn_lyric_thread();
     let (lyric_raster_tx, lyric_raster_rx) = spawn_lyric_raster_thread();
     let music_rx = spawn_music_thread();
-    let wallpaper_list = cfg.wallpapers.clone();
+    let mut wallpaper_list = Vec::new();
+    for wp in &cfg.wallpapers {
+        // 壁纸包多图（project.json images）：展开为包内文件列表
+        if let Some(pack) = crate::wallpaper_pack::resolve_pack(wp) {
+            let dir = std::path::Path::new(wp);
+            for f in pack.spec.rotation_files(dir) {
+                wallpaper_list.push(f);
+            }
+        } else {
+            wallpaper_list.push(wp.clone());
+        }
+    }
     // Image wallpaper: load once at startup (None = transparent / compositor wallpaper).
     // 配置了场景壁纸时，初始不预加载轮换图（场景首帧到达前保持透明，避免闪一下静态图）。
-    let wallpaper_image = if cfg.scene_wallpaper.is_some() {
+    let wallpaper_image = if cfg.scene_wallpaper.as_deref().map_or(false, |sc| !sc.is_empty()) {
         None
     } else if !wallpaper_list.is_empty() {
         let rwp = resolve_wallpaper(&cfg.wallpapers[0]);
@@ -390,7 +401,7 @@ fn main() {
     // SCENE wallpaper: a living environment, persistent (never rotated away).
     let mut scene_player = None;
     let mut scene_first_frame = false;
-    if let Some(scene) = &cfg.scene_wallpaper {
+    if let Some(scene) = cfg.scene_wallpaper.as_deref().filter(|sc| !sc.is_empty()) {
         let rwp = resolve_wallpaper(scene);
         if rwp.kind == "web" {
             let (w, h) = cfg.web_wallpaper_size;
@@ -2244,7 +2255,7 @@ impl App {
             // 停止旧场景，启动新场景（或恢复图片）
             let _ = self.scene_player.take(); // drop: kills Electron + joins reader
             self.scene_first_frame = false;
-            if let Some(scene) = &self.cfg.scene_wallpaper {
+            if let Some(scene) = self.cfg.scene_wallpaper.as_deref().filter(|sc| !sc.is_empty()) {
                 if !scene.is_empty() {
                     let rwp = crate::resolve_wallpaper(scene);
                     if rwp.kind == "web" {

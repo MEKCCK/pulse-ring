@@ -32,6 +32,24 @@ pub struct WallpaperSpec {
     /// Optional Lua behavior script (relative to the pack) — loaded while active.
     #[serde(default)]
     pub lua: Option<String>,
+    /// Optional multi-image rotation list (relative paths). When set, the pack
+    /// rotates through these images; config just references the pack name.
+    #[serde(default)]
+    pub images: Vec<String>,
+}
+
+impl WallpaperSpec {
+    /// Resolve the rotation list for this pack: `images` if set, else [file].
+    pub fn rotation_files(&self, pack_dir: &std::path::Path) -> Vec<String> {
+        let list = if self.images.is_empty() {
+            vec![self.file.clone().unwrap_or_else(|| "image.jpg".to_string())]
+        } else {
+            self.images.clone()
+        };
+        list.into_iter()
+            .map(|f| pack_dir.join(&f).to_string_lossy().to_string())
+            .collect()
+    }
 }
 
 /// A resolved wallpaper: the concrete resource file plus the spec.
@@ -82,10 +100,14 @@ pub fn resolve_pack(path: &str) -> Option<ResolvedWallpaper> {
         "image" => "image.jpg",
         _ => "index.html",
     };
-    let file = spec
-        .file
-        .clone()
-        .unwrap_or_else(|| default_file.to_string());
+    // 多图轮换包（images 非空）：以第一张作为初始显示图，无需 file 字段。
+    let file = if !spec.images.is_empty() {
+        spec.images[0].clone()
+    } else {
+        spec.file
+            .clone()
+            .unwrap_or_else(|| default_file.to_string())
+    };
     let file_path = p.join(&file);
     if !file_path.is_file() {
         return None;
