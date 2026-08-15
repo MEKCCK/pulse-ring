@@ -36,6 +36,8 @@ package() {
   # 图标与桌面项
   install -Dm644 icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/pulse-ring.svg"
   install -Dm644 icon.svg "$pkgdir/usr/share/pixmaps/pulse-ring.svg"
+  install -Dm644 pulse-ring.desktop "$pkgdir/usr/share/applications/pulse-ring.desktop"
+  install -Dm644 pulse-ring-panel.desktop "$pkgdir/usr/share/applications/pulse-ring-panel.desktop"
   # 内置壁纸预设（网页/场景壁纸从编译期目录读取，需打包完整资源）
   install -Dm644 assets/wallpapers/presets.json "$pkgdir/usr/share/pulse-ring/assets/wallpapers/presets.json"
   for d in audio-scene aurora-scene demo-clock.html; do

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=pulse-ring Panel
+Name[zh_CN]=脉冲环控制面板
+Comment=Switch wallpaper packs and adjust global settings
+Comment[zh_CN]=切换壁纸包与调整全局设置（帧率/视频声音）
+Exec=pulse-ring-panel
+Icon=pulse-ring
+Terminal=false
+Categories=Settings;Utility;
+Keywords=wallpaper;panel;settings;
