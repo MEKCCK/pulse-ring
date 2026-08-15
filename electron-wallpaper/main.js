@@ -47,8 +47,61 @@ function pump() {
 
 app.commandLine.appendSwitch('ozone-platform', 'x11');
 app.disableHardwareAcceleration(); // 壁纸场景 CPU 渲染足够，避免 GPU 冲突
+// ---- 从 stdin 读取 pulse-ring 推送的数据（帧协议）----
+//   tag 0x00：音频帧，516 字节（128 f32 频段 + 1 f32 能量）
+//   tag 0x01：配置帧，4 字节长度 + JSON
+const pending = { tag: null, buf: Buffer.alloc(0), need: 1 };
+let win = null;
+
+function handleFrame(buf) {
+  if (pending.tag === 0) {
+    if (buf.length < 516) return;
+    const bands = new Float32Array(128);
+    for (let i = 0; i < 128; i++) bands[i] = buf.readFloatLE(i * 4);
+    const energy = buf.readFloatLE(512);
+    let bass = 0, mid = 0, treble = 0;
+    for (let i = 0; i < 32; i++) bass += bands[i];
+    for (let i = 32; i < 96; i++) mid += bands[i];
+    for (let i = 96; i < 128; i++) treble += bands[i];
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('pulse-bands', {
+        bands: Array.from(bands), energy,
+        bass: bass / 32, mid: mid / 64, treble: treble / 32,
+      });
+    }
+  } else if (pending.tag === 1) {
+    if (buf.length < 4) return;
+    const len = buf.readUInt32LE(0);
+    if (buf.length < 4 + len) return;
+    const cfg = JSON.parse(buf.slice(4, 4 + len).toString('utf8'));
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('pulse-config', cfg);
+    }
+  }
+}
+
+process.stdin.on('data', (chunk) => {
+  let i = 0;
+  while (i < chunk.length) {
+    if (pending.need === 1) {
+      pending.tag = chunk[i++];
+      pending.need = pending.tag === 0 ? 516 : 4;
+      pending.buf = Buffer.alloc(0);
+    } else {
+      const take = Math.min(pending.need, chunk.length - i);
+      pending.buf = Buffer.concat([pending.buf, chunk.slice(i, i + take)]);
+      i += take;
+      pending.need -= take;
+      if (pending.need === 0) {
+        handleFrame(pending.buf);
+        pending.need = 1;
+      }
+    }
+  }
+});
+
 app.whenReady().then(() => {
-  const win = new BrowserWindow({
+  win = new BrowserWindow({
     width,
     height,
     show: false,
@@ -57,6 +110,7 @@ app.whenReady().then(() => {
     webPreferences: {
       offscreen: true,
       backgroundThrottling: false,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
   win.webContents.setFrameRate(30);

@@ -20,9 +20,38 @@ pub struct WebFrame {
 
 pub struct WebWallpaperPlayer {
     pub rx: Receiver<WebFrame>,
+    /// Child stdin: we push audio frames (and the manifest config) to the page.
+    stdin: Option<std::process::ChildStdin>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     child: Option<Child>,
+}
+
+impl WebWallpaperPlayer {
+    /// Send one audio frame: 128 f32 bands + 1 f32 energy (516 bytes, LE).
+    pub fn send_audio(&mut self, bands: &[f32; 128], energy: f32) {
+        let Some(stdin) = self.stdin.as_mut() else { return };
+        use std::io::Write;
+        let mut buf = Vec::with_capacity(516);
+        for b in bands.iter().take(128) {
+            buf.extend_from_slice(&b.to_le_bytes());
+        }
+        buf.extend_from_slice(&energy.to_le_bytes());
+        let _ = stdin.write_all(&buf);
+    }
+
+    /// Send the wallpaper manifest (JSON) to the page via `window.pulseRing.onConfig`.
+    pub fn send_config(&mut self, config_json: &str) {
+        let Some(stdin) = self.stdin.as_mut() else { return };
+        use std::io::Write;
+        let bytes = config_json.as_bytes();
+        let mut buf = Vec::with_capacity(4 + bytes.len());
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(bytes);
+        // Frame type tag: 0 = audio, 1 = config.
+        let _ = stdin.write_all(&[1u8]);
+        let _ = stdin.write_all(&buf);
+    }
 }
 
 impl Drop for WebWallpaperPlayer {
@@ -70,12 +99,13 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
 
     let mut child = Command::new(&electron)
         .args([helper, &abs_html, &width.to_string(), &height.to_string()])
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("spawn electron failed: {e}"))?;
 
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = channel::<WebFrame>();
     let stop = Arc::new(AtomicBool::new(false));
@@ -128,6 +158,7 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
 
     Ok(WebWallpaperPlayer {
         rx,
+        stdin,
         stop,
         handle: Some(handle),
         child: Some(child),

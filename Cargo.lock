@@ -1980,6 +1980,7 @@ dependencies = [
  "realfft",
  "rustfft",
  "rusttype",
+ "serde",
  "serde_json",
  "smithay-client-toolkit",
  "ureq",

@@ -29,6 +29,7 @@ mod lyrics;
 mod plugin;
 mod transitions;
 mod video_wallpaper;
+mod wallpaper_pack;
 mod web_wallpaper;
 use audio::NBANDS;
 use draw::RingRenderer;
@@ -355,11 +356,13 @@ fn main() {
     let mut web_first_frame = false;
     if cfg.wallpapers.is_empty() {
         if let Some(html) = &cfg.web_wallpaper {
-            if web_wallpaper::is_html_path(html) {
+            let (resolved, kind, params_json) = resolve_wallpaper(html);
+            if kind == "web" {
                 let (w, h) = cfg.web_wallpaper_size;
-                log::info!("web wallpaper: starting {html}");
-                match web_wallpaper::start_web_wallpaper(html, w, h) {
-                    Ok(p) => {
+                log::info!("web wallpaper: starting {resolved}");
+                match web_wallpaper::start_web_wallpaper(&resolved, w, h) {
+                    Ok(mut p) => {
+                        p.send_config(&params_json);
                         web_first_frame = true;
                         web_player = Some(p);
                     }
@@ -1449,6 +1452,22 @@ fn rasterize_lyric_image(
 }
 
 
+fn resolve_wallpaper(
+    path: &str,
+) -> (String, String, String) {
+    if let Some(pack) = wallpaper_pack::resolve_pack(path) {
+        let kind = pack.spec.kind.to_ascii_lowercase();
+        let kind = if kind == "video" { "video" } else if kind == "image" { "image" } else { "web" };
+        (pack.file, kind.to_string(), pack.params_json)
+    } else if web_wallpaper::is_html_path(path) {
+        (path.to_string(), "web".to_string(), "{}".to_string())
+    } else if video_wallpaper::is_video_path(path) {
+        (path.to_string(), "video".to_string(), "{}".to_string())
+    } else {
+        (path.to_string(), "image".to_string(), "{}".to_string())
+    }
+}
+
 impl App {
     fn texture_slot_matches(&self, slot: usize, key: &str) -> bool {
         self.texture_slots
@@ -2087,7 +2106,10 @@ impl App {
                 }
             }
         }
-        if let Some(player) = &self.web_player {
+        if let Some(player) = &mut self.web_player {
+            // 音频 API：把本帧频段 + 整体能量推给网页壁纸（JS 可读）
+            let energy: f32 = self.ring_amp_smooth;
+            player.send_audio(&self.bands, energy);
             if let Some(frame) = web_wallpaper::drain_web(&player.rx) {
                 self.wallpaper_image = Some(ImageData {
                     w: frame.width,
@@ -2144,26 +2166,34 @@ impl App {
             let path = &self.wallpaper_list[self.wallpaper_idx];
             self.video_player = None;
             self.web_player = None;
-            if web_wallpaper::is_html_path(path) {
-                let (w, h) = self.cfg.web_wallpaper_size;
-                match web_wallpaper::start_web_wallpaper(path, w, h) {
-                    Ok(p) => {
-                        self.web_player = Some(p);
-                        self.web_first_frame = true;
+            let (resolved, kind, params_json) = resolve_wallpaper(path);
+            match kind.as_str() {
+                "web" => {
+                    let (w, h) = self.cfg.web_wallpaper_size;
+                    match web_wallpaper::start_web_wallpaper(&resolved, w, h) {
+                        Ok(mut p) => {
+                            p.send_config(&params_json);
+                            self.web_player = Some(p);
+                            self.web_first_frame = true;
+                        }
+                        Err(e) => log::warn!("web wallpaper failed ({e})"),
                     }
-                    Err(e) => log::warn!("web wallpaper failed ({e})"),
                 }
-            } else if video_wallpaper::is_video_path(path) {
-                match video_wallpaper::start_video_wallpaper(path, self.cfg.video_wallpaper_audio) {
-                    Ok(p) => {
-                        self.video_player = Some(p);
-                        self.video_first_frame = true;
+                "video" => {
+                    match video_wallpaper::start_video_wallpaper(&resolved, self.cfg.video_wallpaper_audio) {
+                        Ok(p) => {
+                            self.video_player = Some(p);
+                            self.video_first_frame = true;
+                        }
+                        Err(e) => log::warn!("video wallpaper failed ({e})"),
                     }
-                    Err(e) => log::warn!("video wallpaper failed ({e})"),
                 }
-            } else if let Some(img) = load_image_raw(path) {
-                self.wallpaper_image = Some(img);
-                self.wallpaper_dirty = true;
+                _ => {
+                    if let Some(img) = load_image_raw(&resolved) {
+                        self.wallpaper_image = Some(img);
+                        self.wallpaper_dirty = true;
+                    }
+                }
             }
             self.wallpaper_transition_start = elapsed;
             self.wallpaper_switch_at = elapsed + self.cfg.wallpaper_interval;
@@ -2172,7 +2202,12 @@ impl App {
         self.wallpaper_progress = progress;
     }
 
-    fn pull_audio(&mut self) {
+    
+/// Resolve a wallpaper path: a packaged folder (project.json) -> (file, kind, params_json);
+/// otherwise the raw path with a kind guessed from the extension.
+
+
+fn pull_audio(&mut self) {
         while let Ok(b) = self.audio_rx.try_recv() {
             self.bands = b;
         }

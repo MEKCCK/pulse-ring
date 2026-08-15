@@ -1,0 +1,7 @@
+{
+  "type": "scene",
+  "title": "音频粒子场景",
+  "file": "index.html",
+  "audio": true,
+  "params": { "particles": 120, "baseHue": 262 }
+}
