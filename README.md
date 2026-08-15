@@ -102,14 +102,19 @@ webWallpaper: "~/wallpapers/index.html"    // 网页壁纸
 my-wallpaper/
 ├── project.json          # 清单
 ├── index.html            # 网页/场景资源（或 video.mp4 / image.jpg）
-└── assets/...            # 任意引用资源
+├── style.qml             # 可选：该壁纸专属的环样式（QML）
+├── behavior.lua          # 可选：该壁纸专属的行为脚本（Lua）
+└── assets/...            # 任意引用资源（HTML 相对路径直接引用）
 ```
 ```json
 { "type": "scene", "title": "我的壁纸", "file": "index.html",
+  "qml": "style.qml", "lua": "behavior.lua",
   "params": { "particles": 80, "baseHue": 262 } }
 ```
-- `wallpapers: ["~/wallpapers/my-wallpaper"]` 直接传文件夹路径，自动读清单按类型加载
+- 安装到壁纸库：`pulse-ring --install-wallpaper my-wallpaper/` → `~/.config/pulse-ring/wallpapers/my-wallpaper/`
+- 配置按名字引用：`wallpapers: ["my-wallpaper"]` / `sceneWallpaper: "my-wallpaper"` / `imageWallpaper: "my-wallpaper"`
 - `type`: `web`/`scene`（HTML）、`video`（视频）、`image`（图片）
+- `qml`/`lua`：激活该壁纸时应用专属样式与行为
 - `params` 通过 `window.pulseRing.onConfig()` 传给页面
 - 网页/场景壁纸可通过 `window.pulseRing.onAudio(callback)` 获取 128 段频谱以及 `energy`/`bass`/`mid`/`treble`；该方法返回取消订阅函数。`onBands` 作为兼容别名保留，`getAudioData()` 可读取最新一帧。
 
