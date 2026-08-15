@@ -1,3 +1,5 @@
+<p align="center"><img src="icon.svg" width="200" alt="pulse-ring"/></p>
+
 # pulse-ring
 
 Wayland 壁纸层上的音乐律动可视化（GPU 渲染，wgpu/Vulkan）。
