@@ -240,6 +240,8 @@ struct App {
     wallpaper_list: Vec<String>,
     wallpaper_idx: usize,
     wallpaper_switch_at: f32,
+    wallpaper_interval_override: Vec<Option<f32>>,
+    wallpaper_pack_overrides: Vec<crate::wallpaper_pack::PackOverrides>,
     wallpaper_transition_start: f32,
     wallpaper_progress: f32,
     texture_overflow_warned: bool,
@@ -356,15 +358,29 @@ fn main() {
     let (lyric_raster_tx, lyric_raster_rx) = spawn_lyric_raster_thread();
     let music_rx = spawn_music_thread();
     let mut wallpaper_list = Vec::new();
+    // 每个条目对应的包内轮换间隔（None = 用全局 wallpaperInterval）
+    let mut wallpaper_interval_override: Vec<Option<f32>> = Vec::new();
+    // 每个条目对应的包内覆盖（过渡时长/效果/视频声音）
+    let mut wallpaper_pack_overrides: Vec<crate::wallpaper_pack::PackOverrides> = Vec::new();
     for wp in &cfg.wallpapers {
         // 壁纸包多图（project.json images）：展开为包内文件列表
         if let Some(pack) = crate::wallpaper_pack::resolve_pack(wp) {
             let dir = std::path::Path::new(wp);
-            for f in pack.spec.rotation_files(dir) {
+            let files = pack.spec.rotation_files(dir);
+            let n = files.len();
+            for f in files {
                 wallpaper_list.push(f);
+            }
+            for _ in 0..n {
+                wallpaper_interval_override.push(pack.spec.interval);
+            }
+            for _ in 0..n {
+                wallpaper_pack_overrides.push(crate::wallpaper_pack::PackOverrides::from(&pack.spec));
             }
         } else {
             wallpaper_list.push(wp.clone());
+            wallpaper_interval_override.push(None);
+            wallpaper_pack_overrides.push(Default::default());
         }
     }
     // Image wallpaper: load once at startup (None = transparent / compositor wallpaper).
@@ -473,6 +489,8 @@ fn main() {
         wallpaper_force_upload: false,
         log_once_wallpaper: true,
         wallpaper_list,
+        wallpaper_interval_override,
+        wallpaper_pack_overrides: Vec::new(),
         wallpaper_idx: 0,
         wallpaper_switch_at: 0.0,
         wallpaper_transition_start: 0.0,
@@ -2404,7 +2422,12 @@ impl App {
         let elapsed = self.start.elapsed().as_secs_f32();
         if self.scene_player.is_some() || self.wallpaper_list.is_empty() {
             if self.wallpaper_transition_start > 0.0 {
-                let dur = self.cfg.wallpaper_transition.max(0.1);
+                let dur = self
+                    .wallpaper_pack_overrides
+                    .first()
+                    .and_then(|o| o.transition)
+                    .unwrap_or(self.cfg.wallpaper_transition)
+                    .max(0.1);
                 let p = ((elapsed - self.wallpaper_transition_start) / dur).clamp(0.0, 1.0);
                 self.wallpaper_progress = p;
                 if p >= 1.0 {
@@ -2416,9 +2439,20 @@ impl App {
             return;
         }
         let elapsed = self.start.elapsed().as_secs_f32();
-        let dur = self.cfg.wallpaper_transition.max(0.1);
+        let dur = self
+            .wallpaper_pack_overrides
+            .get(self.wallpaper_idx)
+            .and_then(|o| o.transition)
+            .unwrap_or(self.cfg.wallpaper_transition)
+            .max(0.1);
         if self.wallpaper_switch_at == 0.0 {
-            self.wallpaper_switch_at = elapsed + self.cfg.wallpaper_interval;
+            let iv = self
+                .wallpaper_interval_override
+                .get(self.wallpaper_idx)
+                .copied()
+                .flatten()
+                .unwrap_or(self.cfg.wallpaper_interval);
+            self.wallpaper_switch_at = elapsed + iv;
         }
         let mut progress = ((elapsed - self.wallpaper_transition_start) / dur).clamp(0.0, 1.0);
         if progress >= 1.0 && elapsed >= self.wallpaper_switch_at {
@@ -2443,7 +2477,12 @@ impl App {
                     }
                 }
                 "video" => {
-                    match video_wallpaper::start_video_wallpaper(&rwp.file, self.cfg.video_wallpaper_audio) {
+                    let audio = self
+                        .wallpaper_pack_overrides
+                        .get(self.wallpaper_idx)
+                        .and_then(|o| o.audio)
+                        .unwrap_or(self.cfg.video_wallpaper_audio);
+                    match video_wallpaper::start_video_wallpaper(&rwp.file, audio) {
                         Ok(p) => {
                             self.video_player = Some(p);
                             self.video_first_frame = true;
@@ -2459,7 +2498,13 @@ impl App {
                 }
             }
             self.wallpaper_transition_start = elapsed;
-            self.wallpaper_switch_at = elapsed + self.cfg.wallpaper_interval;
+            let iv = self
+                .wallpaper_interval_override
+                .get(self.wallpaper_idx)
+                .copied()
+                .flatten()
+                .unwrap_or(self.cfg.wallpaper_interval);
+            self.wallpaper_switch_at = elapsed + iv;
             progress = 0.0;
         }
         self.wallpaper_progress = progress;
@@ -2637,7 +2682,12 @@ fn pull_audio(&mut self) {
         }
         // Image wallpaper: upload once per change to each renderer (behind everything).
         renderer.set_wallpaper_progress(self.wallpaper_progress);
-        renderer.set_transition_name(&self.cfg.wallpaper_transition_effect);
+        let effect = self
+            .wallpaper_pack_overrides
+            .get(self.wallpaper_idx)
+            .and_then(|o| o.transition_effect.as_deref())
+            .unwrap_or(&self.cfg.wallpaper_transition_effect);
+        renderer.set_transition_name(effect);
         if self.wallpaper_dirty {
             if let Some(img) = &self.wallpaper_image {
                 if (self.video_player.is_some() || self.web_player.is_some() || self.scene_player.is_some())

@@ -36,6 +36,36 @@ pub struct WallpaperSpec {
     /// rotates through these images; config just references the pack name.
     #[serde(default)]
     pub images: Vec<String>,
+    /// Optional rotation interval in seconds (overrides the global
+    /// wallpaperInterval while this pack is active).
+    #[serde(default)]
+    pub interval: Option<f32>,
+    /// Optional transition duration in seconds (overrides wallpaperTransition).
+    #[serde(default)]
+    pub transition: Option<f32>,
+    /// Optional transition effect name (overrides wallpaperTransitionEffect).
+    #[serde(default)]
+    pub transition_effect: Option<String>,
+}
+
+/// Per-pack overrides applied while that pack is the active wallpaper.
+#[derive(Clone, Debug, Default)]
+pub struct PackOverrides {
+    pub interval: Option<f32>,
+    pub transition: Option<f32>,
+    pub transition_effect: Option<String>,
+    pub audio: Option<bool>,
+}
+
+impl From<&WallpaperSpec> for PackOverrides {
+    fn from(spec: &WallpaperSpec) -> Self {
+        Self {
+            interval: spec.interval,
+            transition: spec.transition,
+            transition_effect: spec.transition_effect.clone(),
+            audio: spec.audio,
+        }
+    }
 }
 
 impl WallpaperSpec {
