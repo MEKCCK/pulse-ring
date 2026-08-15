@@ -213,6 +213,23 @@ ApplicationWindow {
                         onToggled: win.setField("videoWallpaperAudio", checked ? "true" : "false")
                     }
                     Item { }
+                    Text { text: "切换动画"; color: "#cdd6f4" }
+                    ComboBox {
+                        id: effectCombo
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+                        model: ["BookFlip", "Bounce", "BowTieHorizonta", "BowTieVertica", "ButterflyWaveScrawler", "Circle", "CircleCrop", "CircleOpen", "ColourDistance", "CrossWarp", "CrossZoom", "Directiona", "DirectionalScaled", "DirectionalWipe", "Dissolve", "Doom", "Doorway", "Dreamy", "DreamyZoom", "Edge", "Fade", "FilmBurn", "GlitchDisplace", "GlitchMemorie", "GridFlip", "Hexagonalize", "HorizontalClose", "HorizontalOpen", "InvertedPageCur", "LeftRight", "LinearBlur", "Mosaic", "Overexposure", "Pixelize", "PolkaDotsCurtain", "Radia", "Rectangle", "Ripple", "Ro", "RotateScaleFade", "RotateScaleVanish", "SimpleZoom", "Slide", "StaticFade", "StereoViewer", "Swir", "TvStatic", "WaterDrop", "WindowBlind", "ZoomInCircle"]
+                        currentIndex: Math.max(0, model.indexOf(win.fieldValue("wallpaperTransitionEffect", "fade").replace(/"/g, "")))
+                        onActivated: win.setField("wallpaperTransitionEffect", '"' + currentText + '"')
+                    }
+                    Text { text: "过渡时长"; color: "#cdd6f4" }
+                    SpinBox {
+                        id: transSpin
+                        from: 1; to: 30; stepSize: 1
+                        value: Math.round(parseFloat(win.fieldValue("wallpaperTransition", "1.5")) * 10)
+                        onValueModified: win.setField("wallpaperTransition", (value / 10).toFixed(1))
+                    }
+                    Text { text: "秒"; color: "#6c7086" }
                 }
                 Button {
                     text: "💾 保存并应用（热重载）"
