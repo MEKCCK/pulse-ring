@@ -7,5 +7,5 @@ Comment[zh_CN]=切换壁纸包与调整全局设置（帧率/视频声音）
 Exec=pulse-ring-panel
 Icon=pulse-ring
 Terminal=false
-Categories=Settings;Utility;
+Categories=Utility;
 Keywords=wallpaper;panel;settings;
