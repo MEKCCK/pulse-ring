@@ -216,8 +216,13 @@ struct App {
     wallpaper_image: Option<ImageData>,
     /// Set when the wallpaper changed and every renderer's texture needs an upload.
     wallpaper_dirty: bool,
-    /// Video wallpaper frame receiver (None when not using videoWallpaper).
-    video_rx: Option<std::sync::mpsc::Receiver<video_wallpaper::VideoFrame>>,
+    /// Video wallpaper player (None when the current wallpaper is an image).
+    video_player: Option<video_wallpaper::VideoPlayer>,
+    /// True on the first frame of a new video session — it should trigger a
+    /// crossfade transition (upload_wallpaper promotes the old frame to prev).
+    video_first_frame: bool,
+    /// Force a full wallpaper upload (promote + mipmap) once, for the first video frame.
+    wallpaper_force_upload: bool,
     /// Only log the first wallpaper upload (video re-uploads every frame).
     log_once_wallpaper: bool,
     /// Rotation state: wallpaper list, current index, switch/transition timers.
@@ -323,22 +328,22 @@ fn main() {
         cfg.image_wallpaper.as_deref().and_then(load_image_raw)
     };
     let wallpaper_dirty = wallpaper_image.is_some();
-    // Video wallpaper takes precedence over the static image.
-    let video_rx = match &cfg.video_wallpaper {
-        Some(vpath) if cfg.image_wallpaper.is_none() || vpath.is_empty() => {
-            log::info!("video wallpaper: starting {vpath}");
-            match video_wallpaper::start_video_wallpaper(vpath) {
-                Ok(rx) => Some(rx),
-                Err(e) => {
-                    log::warn!("video wallpaper failed ({e}); using image wallpaper if set");
-                    None
+    // A standalone videoWallpaper (no rotation list) starts the video immediately.
+    // In a rotation list, entries are started by tick_wallpaper_rotation instead.
+    let mut video_player = None;
+    if cfg.wallpapers.is_empty() {
+        if let Some(vpath) = &cfg.video_wallpaper {
+            if video_wallpaper::is_video_path(vpath) {
+                log::info!("video wallpaper: starting {vpath}");
+                match video_wallpaper::start_video_wallpaper(vpath) {
+                    Ok(p) => video_player = Some(p),
+                    Err(e) => log::warn!("video wallpaper failed ({e})"),
                 }
             }
         }
-        _ => None,
-    };
-    // If a video is running, it replaces the static image as the initial frame.
-    let wallpaper_dirty = wallpaper_dirty || video_rx.is_some();
+    }
+    let video_first_frame = video_player.is_some();
+    let wallpaper_dirty = wallpaper_dirty || video_player.is_some();
     let mut app = App {
         compositor,
         layer_shell,
@@ -365,7 +370,9 @@ fn main() {
         cover_aspect: 1.0,
         wallpaper_image,
         wallpaper_dirty,
-        video_rx,
+        video_player,
+        video_first_frame,
+        wallpaper_force_upload: false,
         log_once_wallpaper: true,
         wallpaper_list,
         wallpaper_idx: 0,
@@ -2036,14 +2043,21 @@ impl App {
         self.interval = std::time::Duration::from_millis(frame_interval_ms(fps));
         // Video wallpaper: pull the newest decoded frame and mark the wallpaper dirty
         // so every renderer re-uploads it (video frames need no mipmaps).
-        if let Some(rx) = &self.video_rx {
-            if let Some(frame) = video_wallpaper::drain_video(rx) {
-                self.wallpaper_image = Some(ImageData {
+        if let Some(player) = &self.video_player {
+            if let Some(frame) = video_wallpaper::drain_video(&player.rx) {
+                let img = ImageData {
                     w: frame.width,
                     h: frame.height,
                     rgba: frame.rgba,
-                });
+                };
+                let first = self.video_first_frame;
+                self.video_first_frame = false;
+                self.wallpaper_image = Some(img);
                 self.wallpaper_dirty = true;
+                if first {
+                    // First frame: full upload so the crossfade transition starts.
+                    self.wallpaper_force_upload = true;
+                }
             }
         }
         self.tick_wallpaper_rotation();
@@ -2074,7 +2088,7 @@ impl App {
     /// Advance the rotating-wallpaper transition and switch to the next image when the
     /// interval elapses. Video wallpaper bypasses rotation (holds progress at 1.0).
     fn tick_wallpaper_rotation(&mut self) {
-        if self.video_rx.is_some() || self.wallpaper_list.is_empty() {
+        if self.wallpaper_list.is_empty() {
             self.wallpaper_progress = 1.0;
             return;
         }
@@ -2086,9 +2100,24 @@ impl App {
         let mut progress = ((elapsed - self.wallpaper_transition_start) / dur).clamp(0.0, 1.0);
         if progress >= 1.0 && elapsed >= self.wallpaper_switch_at {
             self.wallpaper_idx = (self.wallpaper_idx + 1) % self.wallpaper_list.len();
-            if let Some(img) = load_image_raw(&self.wallpaper_list[self.wallpaper_idx]) {
-                self.wallpaper_image = Some(img);
-                self.wallpaper_dirty = true;
+            let path = &self.wallpaper_list[self.wallpaper_idx];
+            if video_wallpaper::is_video_path(path) {
+                // Start a video entry; its first frame triggers the crossfade.
+                self.video_player = None;
+                match video_wallpaper::start_video_wallpaper(path) {
+                    Ok(p) => {
+                        self.video_player = Some(p);
+                        self.video_first_frame = true;
+                    }
+                    Err(e) => log::warn!("video wallpaper failed ({e})"),
+                }
+            } else {
+                // Stop any running video, load the image.
+                self.video_player = None;
+                if let Some(img) = load_image_raw(path) {
+                    self.wallpaper_image = Some(img);
+                    self.wallpaper_dirty = true;
+                }
             }
             self.wallpaper_transition_start = elapsed;
             self.wallpaper_switch_at = elapsed + self.cfg.wallpaper_interval;
@@ -2266,12 +2295,13 @@ impl App {
         renderer.set_wallpaper_progress(self.wallpaper_progress);
         if self.wallpaper_dirty {
             if let Some(img) = &self.wallpaper_image {
-                if self.video_rx.is_some() {
+                if self.video_player.is_some() && !self.wallpaper_force_upload {
                     // Video: reuse the texture (same size), no mipmap generation per frame.
                     renderer.update_wallpaper(&img.rgba, img.w, img.h);
                 } else {
                     renderer.upload_wallpaper(&img.rgba, img.w, img.h);
                 }
+                self.wallpaper_force_upload = false;
                 if self.log_once_wallpaper {
                     self.log_once_wallpaper = false;
                     log::info!("wallpaper: uploaded {}x{} to output {}", img.w, img.h, idx);
