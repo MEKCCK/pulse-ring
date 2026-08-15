@@ -4,6 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::wgt::CompositeAlphaMode;
 
 use crate::audio::NBANDS;
+use crate::transitions;
 
 pub const ATLAS_SLOT_SIZE: u32 = 1024;
 pub const ATLAS_GRID: u32 = 4;
@@ -72,9 +73,31 @@ pub struct RingRenderer {
     wallpaper_prev_texture: Option<wgpu::Texture>,
     wallpaper_prev_view: Option<wgpu::TextureView>,
     wallpaper_progress: f32,
+    /// GLSL transition pass: compiled WGSL + pipeline + bindings for the wallpaper wipe.
+    transition_wgsl: Option<String>,
+    transition_entry: Option<String>,
+    transition_pipeline: Option<wgpu::RenderPipeline>,
+    transition_layout: Option<wgpu::BindGroupLayout>,
+    transition_uniform: wgpu::Buffer,
+    transition_bind_group: Option<wgpu::BindGroup>,
+    /// Static pipeline (no transition — samples only the current wallpaper).
+    static_wallpaper_pipeline: Option<wgpu::RenderPipeline>,
+    static_wallpaper_bind_group: Option<wgpu::BindGroup>,
+    transition_name: String,
+    wallpaper_aspect: f32,
     /// 1x1 transparent view used when no wallpaper is configured (transparent base).
     wallpaper_placeholder_view: wgpu::TextureView,
     wallpaper_mode: u32,
+}
+
+/// Uniforms for the wallpaper transition pass (GLSL `TransitionUniforms` block).
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct TransitionUniforms {
+    progress: f32,
+    screen_aspect: f32,
+    _pad: [f32; 2],
+    params: [[f32; 4]; 7],
 }
 
 /// Shader uniforms. Matches `struct Uniforms` in ring.wgsl.
@@ -359,6 +382,12 @@ impl RingRenderer {
             cache: None,
         });
 
+        let transition_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("transition uniform"),
+            size: 128,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         RingRenderer {
             surface,
             device,
@@ -398,6 +427,16 @@ impl RingRenderer {
             wallpaper_placeholder_view: wp_placeholder_view.clone(),
             wallpaper_mode: 0,
             wallpaper_progress: 1.0,
+            transition_wgsl: None,
+            transition_entry: None,
+            transition_pipeline: None,
+            transition_layout: None,
+            transition_uniform: transition_uniform_buf,
+            transition_bind_group: None,
+            static_wallpaper_pipeline: None,
+            static_wallpaper_bind_group: None,
+            transition_name: String::new(),
+            wallpaper_aspect: 1.0,
         }
     }
 
@@ -519,9 +558,10 @@ impl RingRenderer {
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        // Promote the current wallpaper to "previous" so a transition can crossfade
-        // from the old image to the new one.
-        if self.wallpaper_texture.is_some() && self.wallpaper_progress >= 0.99 {
+        // Promote the current wallpaper to "previous" so a transition can wipe from
+        // the old image to the new one. Always promote when a current exists, so the
+        // old wallpaper is never absent during the switch.
+        if self.wallpaper_texture.is_some() {
             self.wallpaper_prev_texture = self.wallpaper_texture.take();
             self.wallpaper_prev_view = self.wallpaper_view.take();
             self.wallpaper_progress = 0.0;
@@ -788,6 +828,247 @@ impl RingRenderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Set the GLSL transition effect name (e.g. "fade", "circleopen", "crosszoom").
+    pub fn set_transition_name(&mut self, name: &str) {
+        if self.transition_name != name {
+            self.transition_name = name.to_string();
+            self.transition_wgsl = None;
+            self.transition_pipeline = None;
+        }
+    }
+
+    /// (Re)build the wallpaper pass: the GLSL transition pipeline (compiled via naga)
+    /// plus a static fallback, and the shared bind group (from=prev, to=current).
+    fn ensure_wallpaper_pass(&mut self) {
+        let Some(to_view) = self.wallpaper_view.as_ref() else { return };
+        let from_view = self
+            .wallpaper_prev_view
+            .as_ref()
+            .unwrap_or(&self.wallpaper_placeholder_view);
+
+        let layout = if let Some(l) = &self.transition_layout {
+            l.clone()
+        } else {
+            let l = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("wallpaper pass bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: std::num::NonZeroU64::new(128),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+            self.transition_layout = Some(l.clone());
+            l
+        };
+
+        // Static fallback pipeline: sample only the "to" (current) texture.
+        if self.static_wallpaper_pipeline.is_none() {
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("wallpaper static"),
+                source: wgpu::ShaderSource::Wgsl(
+                    r#"
+                    struct TU { progress: f32, screen_aspect: f32, _p: vec2<f32>, params: array<vec4<f32>, 7> }
+                    @group(0) @binding(0) var<uniform> tu: TU;
+                    @group(0) @binding(1) var t_from: texture_2d<f32>;
+                    @group(0) @binding(2) var t_to: texture_2d<f32>;
+                    @group(0) @binding(3) var samp: sampler;
+                    struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+                    @vertex
+                    fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+                        let p = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+                        return VsOut(vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0), p);
+                    }
+                    @fragment
+                    fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                        return textureSample(t_to, samp, uv);
+                    }
+                    "#
+                    .into(),
+                ),
+            });
+            let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("wallpaper static pl"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("wallpaper static"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.static_wallpaper_pipeline = Some(pipeline);
+        }
+
+        // Transition pipeline: compile the GLSL transition (lazy, cached by name).
+        if self.transition_pipeline.is_none() {
+            let wgsl = if self.transition_wgsl.is_none() {
+                let fallback = self.transition_wgsl.clone().unwrap_or_default();
+                let compiled = if self.transition_name.is_empty() {
+                    None
+                } else {
+                    let found = transitions::transition_path(&self.transition_name);
+                    let src = found.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+                    let comp = src.as_deref().and_then(|src| {
+                        transitions::compile(&self.transition_name, src)
+                            .map_err(|e| {
+                                log::warn!("transition '{}' compile failed: {e}", self.transition_name);
+                                e
+                            })
+                            .ok()
+                    });
+                    log::info!(
+                        "transition '{}': file={} compiled={}",
+                        self.transition_name,
+                        found.is_some(),
+                        comp.is_some()
+                    );
+                    comp
+                };
+                match compiled {
+                    Some((wg, entry)) => {
+                        // Append a matching vertex stage producing @location(0) uv.
+                        let mut full = wg;
+                        full.push_str(
+                            r#"
+                            struct WVsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+                            @vertex
+                            fn wp_vs_main(@builtin(vertex_index) vi: u32) -> WVsOut {
+                                let p = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+                                return WVsOut(vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0), p);
+                            }
+                            "#,
+                        );
+                        self.transition_entry = Some(entry);
+                        self.transition_wgsl = Some(full.clone());
+                        full
+                    }
+                    None => fallback,
+                }
+            } else {
+                self.transition_wgsl.clone().unwrap_or_default()
+            };
+            let Some(wgsl) = Some(wgsl) else { return };
+            if wgsl.is_empty() {
+                return;
+            }
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("wallpaper transition"),
+                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+            });
+            let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("wallpaper transition pl"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let entry = self.transition_entry.clone().unwrap_or_else(|| "fs_main".to_string());
+            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("wallpaper transition"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("wp_vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(&entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.transition_pipeline = Some(pipeline);
+        }
+
+        // Shared bind group: uniform + from(prev) + to(current) + sampler.
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wallpaper pass bg"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.transition_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(from_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(to_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.static_wallpaper_bind_group = Some(bg.clone());
+        self.transition_bind_group = Some(bg);
+    }
+
     pub fn render(
         &mut self,
         bands: &[f32; NBANDS],
@@ -957,6 +1238,62 @@ impl RingRenderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ring") });
 
+        // Pass 1: wallpaper (GLSL transition between prev/current, or static current).
+        // The wallpaper fills the whole surface; pass 2 composites the rings over it.
+        let has_wallpaper = self.wallpaper_texture.is_some();
+        if has_wallpaper {
+            self.ensure_wallpaper_pass();
+            // Upload the transition uniform (progress + aspect).
+            let tu = TransitionUniforms {
+                progress: self.wallpaper_progress,
+                screen_aspect: self.width as f32 / self.height as f32,
+                _pad: [0.0, 0.0],
+                params: [[0.0; 4]; 7],
+            };
+            self.queue.write_buffer(&self.transition_uniform, 0, bytemuck::bytes_of(&tu));
+            let transitioning = self.wallpaper_progress < 1.0
+                && self.wallpaper_prev_texture.is_some()
+                && self.transition_pipeline.is_some()
+                && self.transition_bind_group.is_some();
+            let (wp_pipeline, wp_bg) = if transitioning {
+                (
+                    self.transition_pipeline.as_ref().unwrap(),
+                    self.transition_bind_group.as_ref().unwrap(),
+                )
+            } else {
+                let Some(p) = self.static_wallpaper_pipeline.as_ref() else { return };
+                let Some(b) = self.static_wallpaper_bind_group.as_ref() else { return };
+                (p, b)
+            };
+            let mut wp_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("wallpaper pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            wp_pass.set_pipeline(wp_pipeline);
+            wp_pass.set_bind_group(0, wp_bg, &[]);
+            wp_pass.draw(0..3, 0..1);
+            drop(wp_pass);
+        }
+
+        // Pass 2: rings/particles/widgets. With a wallpaper, load its pixels and blend
+        // over it; without one, keep the transparent clear (compositor wallpaper shows).
+        let load_op = if has_wallpaper {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ring pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -964,8 +1301,7 @@ impl RingRenderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // Fully transparent clear — wallpaper shows through where the ring has alpha 0.
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: load_op,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -1799,21 +2135,8 @@ const SHADER_SRC: &str = stringify!(
                 wp_uv.y = wp_uv.y * s + 0.5 * (1.0 - s);
             }
         }
-        // stretch: uv unchanged
-        // Transition between the previous and current wallpaper: crossfade + a gentle
-        // zoom-out of the incoming image (ease in-out on the progress).
-        let t = u.wallpaper_progress * u.wallpaper_progress * (3.0 - 2.0 * u.wallpaper_progress);
-        var prev_uv = wp_uv;
-        var cur_uv = wp_uv;
-        if (t < 1.0) {
-            // Incoming image scales 1.06 -> 1.0, outgoing stays put (crossfade blend).
-            let zoom = 1.0 + 0.06 * (1.0 - t);
-            cur_uv = (cur_uv - 0.5) * zoom + 0.5;
-        }
-        var wc = textureSample(wallpaper_prev_tex, widget_sampler, prev_uv);
-        let wc_new = textureSample(wallpaper_tex, widget_sampler, cur_uv);
-        wc = mix(wc, wc_new, t);
         let uncovered = 1.0 - min(alpha, 1.0);
+        let wc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
         let out_a = min(alpha, 1.0) + wc.a * uncovered;
         let out_col = col * min(alpha, 1.0) + wc.rgb * wc.a * uncovered;
         if (out_a <= 0.004) {

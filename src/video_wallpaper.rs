@@ -41,8 +41,10 @@ impl Drop for VideoPlayer {
     }
 }
 
-/// Start playing `path` as a wallpaper video. Loops; audio routes to the default sink.
-pub fn start_video_wallpaper(path: &str) -> Result<VideoPlayer, String> {
+/// Start playing `path` as a wallpaper video. Loops. When `audio` is true the sound
+/// routes to the default sink (so the visualisation reacts to it); when false the
+/// video plays silently.
+pub fn start_video_wallpaper(path: &str, audio: bool) -> Result<VideoPlayer, String> {
     gst::init().map_err(|e| format!("gstreamer init failed: {e}"))?;
 
     let uri = if path.contains("://") {
@@ -75,7 +77,7 @@ pub fn start_video_wallpaper(path: &str) -> Result<VideoPlayer, String> {
                 Err(_) => return,
             };
             pipeline.set_property("uri", &uri);
-            pipeline.set_property_from_str("flags", "video+audio");
+            pipeline.set_property_from_str("flags", if audio { "video+audio" } else { "video" });
 
             let appsink: gst_app::AppSink = match gst::ElementFactory::make("appsink")
                 .name("video-sink")

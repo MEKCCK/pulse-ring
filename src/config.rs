@@ -328,12 +328,17 @@ pub struct Config {
     pub image_wallpaper_mode: WallpaperMode,
     /// Optional video wallpaper path (takes precedence over imageWallpaper).
     pub video_wallpaper: Option<String>,
+    /// Whether video wallpapers play their audio through the default sink.
+    pub video_wallpaper_audio: bool,
     /// Rotating image wallpaper list (each entry is a path); empty = no rotation.
     pub wallpapers: Vec<String>,
     /// Seconds between wallpaper rotations (only used with `wallpapers`).
     pub wallpaper_interval: f32,
-    /// Seconds for the crossfade/zoom transition between wallpapers.
+    /// Seconds for the transition between wallpapers.
     pub wallpaper_transition: f32,
+    /// Transition effect name (one of the built-in GLSL transitions, e.g. "fade",
+    /// "circleopen", "crosszoom"); empty = "fade".
+    pub wallpaper_transition_effect: String,
     // ---- lua ----
     /// Optional Lua script path; the script can transform bands, tweak config and widgets
     /// at runtime via `onUpdate`, `transformBands`, etc.
@@ -410,9 +415,11 @@ impl Default for Config {
             image_wallpaper: None,
             image_wallpaper_mode: WallpaperMode::Cover,
             video_wallpaper: None,
+            video_wallpaper_audio: true,
             wallpapers: Vec::new(),
             wallpaper_interval: 30.0,
             wallpaper_transition: 1.2,
+            wallpaper_transition_effect: "fade".into(),
             color_mode: ColorMode::Gradient,
             colors: vec![
                 [0.404, 0.314, 0.643, 1.0], // MD3 Primary #6750A4
@@ -965,6 +972,7 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
                 cfg.video_wallpaper = Some(s.clone());
             }
         }
+        "videoWallpaperAudio" => cfg.video_wallpaper_audio = num(v).unwrap_or(1.0) > 0.5,
         "wallpapers" => {
             if let Val::Arr(items) = v {
                 cfg.wallpapers.clear();
@@ -977,6 +985,11 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
         }
         "wallpaperInterval" => cfg.wallpaper_interval = num(v).unwrap_or(30.0).max(5.0),
         "wallpaperTransition" => cfg.wallpaper_transition = num(v).unwrap_or(1.2).max(0.1),
+        "wallpaperTransitionEffect" => {
+            if let Val::Str(s) = v {
+                cfg.wallpaper_transition_effect = s.clone();
+            }
+        }
         "imageWallpaperMode" => {
             if let Val::Str(s) = v {
                 cfg.image_wallpaper_mode = match s.to_ascii_lowercase().as_str() {

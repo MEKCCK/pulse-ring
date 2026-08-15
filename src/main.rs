@@ -27,6 +27,7 @@ mod draw;
 mod lua;
 mod lyrics;
 mod plugin;
+mod transitions;
 mod video_wallpaper;
 use audio::NBANDS;
 use draw::RingRenderer;
@@ -332,10 +333,11 @@ fn main() {
     // In a rotation list, entries are started by tick_wallpaper_rotation instead.
     let mut video_player = None;
     if cfg.wallpapers.is_empty() {
+        let video_audio = cfg.video_wallpaper_audio;
         if let Some(vpath) = &cfg.video_wallpaper {
             if video_wallpaper::is_video_path(vpath) {
-                log::info!("video wallpaper: starting {vpath}");
-                match video_wallpaper::start_video_wallpaper(vpath) {
+                log::info!("video wallpaper: starting {vpath} (audio={video_audio})");
+                match video_wallpaper::start_video_wallpaper(vpath, video_audio) {
                     Ok(p) => video_player = Some(p),
                     Err(e) => log::warn!("video wallpaper failed ({e})"),
                 }
@@ -2104,7 +2106,7 @@ impl App {
             if video_wallpaper::is_video_path(path) {
                 // Start a video entry; its first frame triggers the crossfade.
                 self.video_player = None;
-                match video_wallpaper::start_video_wallpaper(path) {
+                match video_wallpaper::start_video_wallpaper(path, self.cfg.video_wallpaper_audio) {
                     Ok(p) => {
                         self.video_player = Some(p);
                         self.video_first_frame = true;
@@ -2293,6 +2295,7 @@ impl App {
         }
         // Image wallpaper: upload once per change to each renderer (behind everything).
         renderer.set_wallpaper_progress(self.wallpaper_progress);
+        renderer.set_transition_name(&self.cfg.wallpaper_transition_effect);
         if self.wallpaper_dirty {
             if let Some(img) = &self.wallpaper_image {
                 if self.video_player.is_some() && !self.wallpaper_force_upload {
