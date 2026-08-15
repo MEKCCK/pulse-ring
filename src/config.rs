@@ -425,7 +425,7 @@ impl Default for Config {
             video_wallpaper_audio: true,
             web_wallpaper: None,
             scene_wallpaper: None,
-            web_wallpaper_size: (1920, 1080),
+            web_wallpaper_size: (960, 540),
             wallpapers: Vec::new(),
             wallpaper_interval: 30.0,
             wallpaper_transition: 1.2,

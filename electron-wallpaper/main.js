@@ -20,6 +20,8 @@ let writing = false;
 let paused = false;
 
 function writeFrame(buf) {
+  // 管道忙（stdout 未排空）时直接丢弃本帧：防止队列无界增长导致内存爆炸。
+  if (paused) return;
   const header = Buffer.alloc(8);
   header.writeUInt32LE(width, 0);
   header.writeUInt32LE(height, 4);
