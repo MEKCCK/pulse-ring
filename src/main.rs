@@ -525,7 +525,11 @@ impl OutputHandler for App {
         let layer = self.layer_shell.create_layer_surface(
             qh,
             surface,
-            Layer::Background,
+            // KDE may recreate its desktop Background layer when a Wayland
+            // screencast starts. A later desktop surface can then cover us.
+            // Bottom remains below normal windows/panels while staying above
+            // the compositor-managed desktop background.
+            Layer::Bottom,
             Some("pulse-ring"),
             Some(&output),
         );

@@ -1,0 +1,5 @@
+[
+  { "id": "purple-particles", "title": "紫色音频粒子", "path": "audio-scene", "audio": true },
+  { "id": "demo-clock", "title": "渐变时钟", "path": "demo-clock.html", "audio": false },
+  { "id": "aurora", "title": "极光声场", "path": "aurora-scene", "audio": true }
+]

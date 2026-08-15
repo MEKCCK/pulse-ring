@@ -12,7 +12,7 @@
 <script>
 // pulse-ring 示例场景：低频驱动脉冲环，中频驱动粒子，高频驱动星芒。
 const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { alpha: false });
 let W, H;
 function resize() {
   W = canvas.width = innerWidth;
@@ -21,7 +21,7 @@ function resize() {
 resize();
 addEventListener('resize', resize);
 
-const cfg = { particles: 96, baseHue: 262, spectrum: true, trails: 0.2 };
+const cfg = { particles: 96, baseHue: 262, spectrum: true };
 let energy = 0, bass = 0, mid = 0, treble = 0;
 let targetEnergy = 0, targetBass = 0, targetMid = 0, targetTreble = 0;
 let bands = new Float32Array(128);
@@ -63,8 +63,9 @@ function frame() {
   mid += (targetMid - mid) * 0.14;
   treble += (targetTreble - treble) * 0.3;
 
-  const fade = Math.max(0.06, Math.min(0.5, Number(cfg.trails) || 0.2));
-  ctx.fillStyle = `rgba(6, 5, 18, ${fade})`;
+  // Always start from a fresh frame so moving particles leave no trails.
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#060512';
   ctx.fillRect(0, 0, W, H);
 
   const breathe = 0.72 + 0.28 * Math.sin(t * 1.7);
@@ -96,9 +97,10 @@ function frame() {
     const rr = p.r + Math.sin(p.b) * 0.025 + band * 0.1 + bass * 0.025;
     const x = W/2 + Math.cos(p.a) * rr * W;
     const y = H/2 + Math.sin(p.a) * rr * H;
+    const size = p.s * (1 + band * 2 + treble);
     ctx.beginPath();
-    ctx.arc(x, y, p.s * (1 + band * 2 + treble), 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${p.hue + treble * 35}, 90%, ${62 + band * 24}%, ${0.25 + band * 0.7})`;
+    ctx.arc(x, y, size, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${p.hue + treble * 35}, 90%, ${62 + band * 24}%, ${0.3 + band * 0.65})`;
     ctx.fill();
   }
 
