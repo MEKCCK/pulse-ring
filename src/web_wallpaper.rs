@@ -104,7 +104,8 @@ fn electron_binary() -> std::path::PathBuf {
 /// Start rendering `html_path` at `width`x`height` via Electron offscreen.
 pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<WebWallpaperPlayer, String> {
     let electron = electron_binary();
-    if !electron.is_file() {
+    let is_cmd = electron.components().count() == 1; // bare command name ("electron")
+    if !is_cmd && !electron.is_file() {
         return Err(format!(
             "project Electron not found at {} (run npm install in electron-wallpaper)",
             electron.display()

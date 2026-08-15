@@ -43,7 +43,8 @@ package() {
   install -Dm644 electron-wallpaper/preload.js "$pkgdir/usr/share/pulse-ring/electron-wallpaper/preload.js"
   install -Dm644 electron-wallpaper/package.json "$pkgdir/usr/share/pulse-ring/electron-wallpaper/package.json"
   # 2) 50+ 种 GLSL 过渡着色器
-  install -Dm644 assets/shaders/transitions/*.glsl "$pkgdir/usr/share/pulse-ring/assets/shaders/transitions/"
+  mkdir -p "$pkgdir/usr/share/pulse-ring/assets/shaders/transitions"
+  install -m644 assets/shaders/transitions/*.glsl "$pkgdir/usr/share/pulse-ring/assets/shaders/transitions/"
   # 3) 内置壁纸预设（首次运行自动部署到 ~/.config/pulse-ring/wallpapers/）
   install -Dm644 assets/wallpapers/presets.json "$pkgdir/usr/share/pulse-ring/assets/wallpapers/presets.json"
   for d in audio-scene aurora-scene demo-clock.html; do

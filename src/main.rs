@@ -2271,6 +2271,8 @@ impl App {
             {
                 self.wallpaper_image = Some(img);
                 self.wallpaper_dirty = true;
+                // 播放一次过渡动画（旧图 → 新图）
+                self.wallpaper_transition_start = self.start.elapsed().as_secs_f32();
             }
         }
         if lua_changed {
@@ -2386,8 +2388,20 @@ impl App {
     /// interval elapses. Video wallpaper bypasses rotation (holds progress at 1.0).
     fn tick_wallpaper_rotation(&mut self) {
         // A scene is the living wallpaper — rotation only applies to image/video lists.
+        // Single-image / scene mode: a transition still plays once when the wallpaper
+        // changes (hot reload / panel switch) via wallpaper_transition_start.
+        let elapsed = self.start.elapsed().as_secs_f32();
         if self.scene_player.is_some() || self.wallpaper_list.is_empty() {
-            self.wallpaper_progress = 1.0;
+            if self.wallpaper_transition_start > 0.0 {
+                let dur = self.cfg.wallpaper_transition.max(0.1);
+                let p = ((elapsed - self.wallpaper_transition_start) / dur).clamp(0.0, 1.0);
+                self.wallpaper_progress = p;
+                if p >= 1.0 {
+                    self.wallpaper_transition_start = 0.0;
+                }
+            } else {
+                self.wallpaper_progress = 1.0;
+            }
             return;
         }
         let elapsed = self.start.elapsed().as_secs_f32();
