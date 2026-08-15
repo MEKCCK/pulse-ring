@@ -363,10 +363,20 @@ fn main() {
     // 每个条目对应的包内覆盖（过渡时长/效果/视频声音）
     let mut wallpaper_pack_overrides: Vec<crate::wallpaper_pack::PackOverrides> = Vec::new();
     for wp in &cfg.wallpapers {
-        // 壁纸包多图（project.json images）：展开为包内文件列表
-        if let Some(pack) = crate::wallpaper_pack::resolve_pack(wp) {
-            let dir = std::path::Path::new(wp);
-            let files = pack.spec.rotation_files(dir);
+        // 壁纸包多图（project.json images）：展开为包内文件列表。
+        // 包名（"Jade-Feet"）先解析到壁纸库目录，再读清单展开。
+        let pack_dir = crate::wallpaper_pack::resolve_library_path(wp).or_else(|| {
+            let p = std::path::Path::new(wp);
+            p.is_dir().then(|| p.to_path_buf())
+        });
+        if let Some(dir) = pack_dir {
+            let Some(pack) = crate::wallpaper_pack::resolve_pack(&dir.to_string_lossy()) else {
+                wallpaper_list.push(wp.clone());
+                wallpaper_interval_override.push(None);
+                wallpaper_pack_overrides.push(Default::default());
+                continue;
+            };
+            let files = pack.spec.rotation_files(&dir);
             let n = files.len();
             for f in files {
                 wallpaper_list.push(f);
