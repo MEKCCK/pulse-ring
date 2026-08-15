@@ -337,6 +337,11 @@ pub struct Config {
     pub scene_wallpaper: Option<String>,
     /// Render size for the web wallpaper (screen-sized by default).
     pub web_wallpaper_size: (u32, u32),
+    /// Wayland layer for the wallpaper surface.
+    /// "background" = layer-shell Background (transparent windows see it);
+    /// "bottom" = below normal windows/panels (KDE screencast safe).
+    /// Defaults to "background", or "bottom" when running under KDE.
+    pub wallpaper_layer: String,
     /// Rotating image wallpaper list (each entry is a path); empty = no rotation.
     pub wallpapers: Vec<String>,
     /// Seconds between wallpaper rotations (only used with `wallpapers`).
@@ -426,6 +431,7 @@ impl Default for Config {
             web_wallpaper: None,
             scene_wallpaper: None,
             web_wallpaper_size: (960, 540),
+            wallpaper_layer: "auto".to_string(),
             wallpapers: Vec::new(),
             wallpaper_interval: 30.0,
             wallpaper_transition: 1.2,

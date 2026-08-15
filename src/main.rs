@@ -549,14 +549,24 @@ impl OutputHandler for App {
         }
         // Create a layer surface bound to this specific output.
         let surface = self.compositor.create_surface(qh);
+        // KDE may recreate its desktop Background layer when a Wayland screencast
+        // starts, so KDE users can opt into Bottom. Otherwise Background is the
+        // classic wallpaper layer and lets transparent windows (kitty etc.) see us.
+        let layer = match self.cfg.wallpaper_layer.as_str() {
+            "bottom" => Layer::Bottom,
+            "background" => Layer::Background,
+            _ => {
+                let kde = std::env::var("XDG_CURRENT_DESKTOP")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .contains("kde");
+                if kde { Layer::Bottom } else { Layer::Background }
+            }
+        };
         let layer = self.layer_shell.create_layer_surface(
             qh,
             surface,
-            // KDE may recreate its desktop Background layer when a Wayland
-            // screencast starts. A later desktop surface can then cover us.
-            // Bottom remains below normal windows/panels while staying above
-            // the compositor-managed desktop background.
-            Layer::Bottom,
+            layer,
             Some("pulse-ring"),
             Some(&output),
         );
