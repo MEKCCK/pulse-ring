@@ -2,9 +2,23 @@
 // pulse-ring 日常配置 —— Material Design 3 风格
 // ============================================================
 PulseRing {
-    // 图片壁纸（壁纸引擎基础功能；留空 = 透明显示系统壁纸）
-    // imageWallpaper: "~/Pictures/壁纸.jpg"
-    // imageWallpaperMode: "cover"   // cover=裁剪铺满 / contain=完整显示 / stretch=拉伸
+    // ================= 壁纸引擎 =================
+    // 三种类型任意混排轮播（图片 / 视频 / 网页 HTML）：
+    //   wallpapers: [
+    //     "~/Videos/壁纸.mp4",                      // 视频（GStreamer 解码，可带声音）
+    //     "~/Pictures/壁纸.jpg",                    // 图片
+    //     "~/wallpapers/我的壁纸/index.html"        // 网页壁纸（Electron 离屏渲染 HTML/CSS/JS）
+    //   ]
+    // wallpaperInterval: 12          // 轮换间隔（秒）
+    // wallpaperTransition: 1.8       // 过渡时长（秒）
+    // wallpaperTransitionEffect: "crosszoom"  // 50+ 种切换动画：fade/circleopen/crosszoom/glitchmemories…
+    //
+    // 单张壁纸（不轮播时）：
+    //   imageWallpaper: "~/Pictures/壁纸.jpg"      // 静态图
+    //   imageWallpaperMode: "cover"                 // cover/contain/stretch
+    //   videoWallpaper: "~/Videos/壁纸.mp4"        // 视频
+    //   videoWallpaperAudio: true                   // 视频是否出声
+    //   webWallpaper: "~/wallpapers/index.html"     // 网页
 
     // Lua 脚本（动态控制/自定义算法）
     luaScript: "~/.config/pulse-ring/pulse-ring.lua"

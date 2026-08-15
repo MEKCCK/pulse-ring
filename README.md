@@ -77,19 +77,23 @@ PulseRing {
 }
 ```
 
-**壁纸配置**（壁纸引擎）：
+**壁纸配置**（壁纸引擎，三种类型任意混排）：
 ```qml
-imageWallpaper: "~/Pictures/壁纸.jpg"       // 静态图片（留空=透明）
-imageWallpaperMode: "cover"                 // cover/contain/stretch
-videoWallpaper: "~/Videos/壁纸.mp4"         // 视频壁纸（优先级高于图片）
-videoWallpaperAudio: true                   // 视频壁纸是否出声
-wallpapers: [                              // 轮播列表（图片/视频可混排）
-    "~/Pictures/壁纸.jpg",
-    "~/Videos/壁纸.mp4"
+wallpapers: [                              // 轮播列表：图片 / 视频 / 网页(HTML) 可混排
+    "~/Videos/壁纸.mp4",                   // 视频壁纸（GStreamer 解码，可带声音）
+    "~/Pictures/壁纸.jpg",                 // 图片壁纸
+    "~/wallpapers/我的壁纸/index.html"     // 网页壁纸（Electron 离屏渲染 HTML/CSS/JS）
 ]
-wallpaperInterval: 10                       // 轮换间隔（秒）
-wallpaperTransition: 1.5                    // 过渡时长（秒）
-wallpaperTransitionEffect: "crosszoom"      // 50+ 种过渡效果之一
+wallpaperInterval: 12                       // 轮换间隔（秒）
+wallpaperTransition: 1.8                    // 过渡时长（秒）
+wallpaperTransitionEffect: "crosszoom"      // 50+ 种过渡效果之一（fade/circleopen/glitchmemories…）
+
+// 单张模式（不轮播）：
+imageWallpaper: "~/Pictures/壁纸.jpg"      // 静态图（留空=透明）
+imageWallpaperMode: "cover"                // cover/contain/stretch
+videoWallpaper: "~/Videos/壁纸.mp4"        // 视频
+videoWallpaperAudio: true                  // 视频是否出声
+webWallpaper: "~/wallpapers/index.html"    // 网页壁纸
 ```
 
 **歌词来源**（按优先级）：
