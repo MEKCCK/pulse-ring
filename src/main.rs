@@ -357,9 +357,10 @@ fn main() {
     let wallpaper_image = if cfg.scene_wallpaper.is_some() {
         None
     } else if !wallpaper_list.is_empty() {
-        cfg.wallpapers.first().and_then(|p| load_image_raw(p))
+        let rwp = resolve_wallpaper(&cfg.wallpapers[0]);
+        (rwp.kind != "web" && rwp.kind != "video").then(|| rwp.file).and_then(|f| load_image_raw(&f))
     } else {
-        cfg.image_wallpaper.as_deref().and_then(load_image_raw)
+        cfg.image_wallpaper.as_deref().map(resolve_wallpaper).and_then(|rwp| load_image_raw(&rwp.file))
     };
     let wallpaper_dirty = wallpaper_image.is_some();
     // A standalone videoWallpaper (no rotation list) starts the video immediately.
@@ -382,13 +383,13 @@ fn main() {
     let mut scene_player = None;
     let mut scene_first_frame = false;
     if let Some(scene) = &cfg.scene_wallpaper {
-        let (resolved, kind, params_json) = resolve_wallpaper(scene);
-        if kind == "web" {
+        let rwp = resolve_wallpaper(scene);
+        if rwp.kind == "web" {
             let (w, h) = cfg.web_wallpaper_size;
-            log::info!("scene wallpaper: starting {resolved}");
-            match web_wallpaper::start_web_wallpaper(&resolved, w, h) {
+            log::info!("scene wallpaper: starting {}", rwp.file);
+            match web_wallpaper::start_web_wallpaper(&rwp.file, w, h) {
                 Ok(mut p) => {
-                    p.send_config(&params_json);
+                    p.send_config(&rwp.params);
                     scene_first_frame = true;
                     scene_player = Some(p);
                 }
@@ -402,13 +403,13 @@ fn main() {
     let mut web_first_frame = false;
     if cfg.wallpapers.is_empty() {
         if let Some(html) = &cfg.web_wallpaper {
-            let (resolved, kind, params_json) = resolve_wallpaper(html);
-            if kind == "web" {
+            let rwp = resolve_wallpaper(html);
+            if rwp.kind == "web" {
                 let (w, h) = cfg.web_wallpaper_size;
-                log::info!("web wallpaper: starting {resolved}");
-                match web_wallpaper::start_web_wallpaper(&resolved, w, h) {
+                log::info!("web wallpaper: starting {}", rwp.file);
+                match web_wallpaper::start_web_wallpaper(&rwp.file, w, h) {
                     Ok(mut p) => {
-                        p.send_config(&params_json);
+                        p.send_config(&rwp.params);
                         web_first_frame = true;
                         web_player = Some(p);
                     }
@@ -1539,9 +1540,41 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()>
     Ok(())
 }
 
-fn resolve_wallpaper(
-    path: &str,
-) -> (String, String, String) {
+/// 解析后的壁纸（pack 或裸路径）。
+struct ResolvedWp {
+    file: String,
+    kind: String,
+    params: String,
+    qml: Option<String>,
+    lua: Option<String>,
+}
+
+/// 应用壁纸包内的 QML 样式与 Lua 行为（保留壁纸相关配置字段）。
+fn apply_pack_style(cfg: &mut config::Config, rwp: &ResolvedWp) {
+    if let Some(q) = &rwp.qml {
+        if let Ok(src) = std::fs::read_to_string(q) {
+            let parsed = config::parse_for_test(&src);
+            let wp = cfg.image_wallpaper.clone();
+            let vw = cfg.video_wallpaper.clone();
+            let ww = cfg.web_wallpaper.clone();
+            let sw = cfg.scene_wallpaper.clone();
+            let wp_list = cfg.wallpapers.clone();
+            *cfg = parsed;
+            cfg.image_wallpaper = wp;
+            cfg.video_wallpaper = vw;
+            cfg.web_wallpaper = ww;
+            cfg.scene_wallpaper = sw;
+            cfg.wallpapers = wp_list;
+            log::info!("pack: applied QML style {q}");
+        }
+    }
+    if let Some(l) = &rwp.lua {
+        cfg.lua_script = Some(l.clone());
+        log::info!("pack: applied Lua behavior {l}");
+    }
+}
+
+fn resolve_wallpaper(path: &str) -> ResolvedWp {
     // 壁纸库：裸名字或相对路径先查 ~/.config/pulse-ring/wallpapers/<name>
     let resolved_path = if std::path::Path::new(path).is_absolute() || std::path::Path::new(path).exists() {
         path.to_string()
@@ -1554,13 +1587,13 @@ fn resolve_wallpaper(
     if let Some(pack) = wallpaper_pack::resolve_pack(path) {
         let kind = pack.spec.kind.to_ascii_lowercase();
         let kind = if kind == "video" { "video" } else if kind == "image" { "image" } else { "web" };
-        (pack.file, kind.to_string(), pack.params_json)
+        ResolvedWp { file: pack.file, kind: kind.to_string(), params: pack.params_json, qml: pack.qml, lua: pack.lua }
     } else if web_wallpaper::is_html_path(path) {
-        (path.to_string(), "web".to_string(), "{}".to_string())
+        ResolvedWp { file: path.to_string(), kind: "web".into(), params: "{}".into(), qml: None, lua: None }
     } else if video_wallpaper::is_video_path(path) {
-        (path.to_string(), "video".to_string(), "{}".to_string())
+        ResolvedWp { file: path.to_string(), kind: "video".into(), params: "{}".into(), qml: None, lua: None }
     } else {
-        (path.to_string(), "image".to_string(), "{}".to_string())
+        ResolvedWp { file: path.to_string(), kind: "image".into(), params: "{}".into(), qml: None, lua: None }
     }
 }
 
@@ -2274,13 +2307,13 @@ impl App {
             let path = &self.wallpaper_list[self.wallpaper_idx];
             self.video_player = None;
             self.web_player = None;
-            let (resolved, kind, params_json) = resolve_wallpaper(path);
-            match kind.as_str() {
+            let rwp = resolve_wallpaper(path);
+            match rwp.kind.as_str() {
                 "web" => {
                     let (w, h) = self.cfg.web_wallpaper_size;
-                    match web_wallpaper::start_web_wallpaper(&resolved, w, h) {
+                    match web_wallpaper::start_web_wallpaper(&rwp.file, w, h) {
                         Ok(mut p) => {
-                            p.send_config(&params_json);
+                            p.send_config(&rwp.params);
                             self.web_player = Some(p);
                             self.web_first_frame = true;
                         }
@@ -2288,7 +2321,7 @@ impl App {
                     }
                 }
                 "video" => {
-                    match video_wallpaper::start_video_wallpaper(&resolved, self.cfg.video_wallpaper_audio) {
+                    match video_wallpaper::start_video_wallpaper(&rwp.file, self.cfg.video_wallpaper_audio) {
                         Ok(p) => {
                             self.video_player = Some(p);
                             self.video_first_frame = true;
@@ -2297,7 +2330,7 @@ impl App {
                     }
                 }
                 _ => {
-                    if let Some(img) = load_image_raw(&resolved) {
+                    if let Some(img) = load_image_raw(&rwp.file) {
                         self.wallpaper_image = Some(img);
                         self.wallpaper_dirty = true;
                     }

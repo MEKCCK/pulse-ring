@@ -24,6 +24,13 @@ pub struct WallpaperSpec {
     /// Target resolution "WxH" (optional; defaults to the configured web size).
     #[serde(default)]
     pub resolution: Option<String>,
+    /// Optional QML style file (relative to the pack) — applied while this wallpaper
+    /// is active (replaces the global visual config).
+    #[serde(default)]
+    pub qml: Option<String>,
+    /// Optional Lua behavior script (relative to the pack) — loaded while active.
+    #[serde(default)]
+    pub lua: Option<String>,
 }
 
 /// A resolved wallpaper: the concrete resource file plus the spec.
@@ -32,6 +39,10 @@ pub struct ResolvedWallpaper {
     pub spec: WallpaperSpec,
     /// Serialized params JSON (for the web page), or "{}".
     pub params_json: String,
+    /// Resolved absolute path of the pack's QML (None if absent).
+    pub qml: Option<String>,
+    /// Resolved absolute path of the pack's Lua (None if absent).
+    pub lua: Option<String>,
 }
 
 /// Wallpaper library directory: `$XDG_CONFIG_HOME/pulse-ring/wallpapers/<name>/`.
@@ -83,10 +94,14 @@ pub fn resolve_pack(path: &str) -> Option<ResolvedWallpaper> {
         .clone()
         .map(|v| v.to_string())
         .unwrap_or_else(|| "{}".to_string());
+    let qml = spec.qml.as_ref().map(|q| p.join(q).to_string_lossy().to_string());
+    let lua = spec.lua.as_ref().map(|l| p.join(l).to_string_lossy().to_string());
     Some(ResolvedWallpaper {
         file: file_path.to_string_lossy().to_string(),
         spec,
         params_json,
+        qml,
+        lua,
     })
 }
 
