@@ -339,6 +339,8 @@ pub struct Config {
     pub web_wallpaper_size: (u32, u32),
     /// File modification time of the loaded config (for hot-reload checks).
     pub modified: Option<std::time::SystemTime>,
+    /// Render frame rate (fps). Default 30.
+    pub fps: u32,
     /// Wayland layer for the wallpaper surface.
     /// "background" = layer-shell Background (transparent windows see it);
     /// "bottom" = below normal windows/panels (KDE screencast safe).
@@ -435,6 +437,7 @@ impl Default for Config {
             scene_wallpaper: None,
             web_wallpaper_size: (960, 540),
             wallpaper_layer: "auto".to_string(),
+            fps: 30,
             wallpapers: Vec::new(),
             wallpaper_interval: 30.0,
             wallpaper_transition: 1.2,

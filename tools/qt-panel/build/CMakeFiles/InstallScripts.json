@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/elite/Projects/pulse-ring/tools/qt-panel/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

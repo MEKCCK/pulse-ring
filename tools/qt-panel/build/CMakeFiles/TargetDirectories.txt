@@ -1,0 +1,6 @@
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/CMakeFiles/pulse-ring-panel.dir
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/CMakeFiles/pulse-ring-panel_qmlimportscan.dir
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/CMakeFiles/edit_cache.dir
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/CMakeFiles/rebuild_cache.dir
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/CMakeFiles/pulse-ring-panel_autogen_timestamp_deps.dir
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/CMakeFiles/pulse-ring-panel_autogen.dir

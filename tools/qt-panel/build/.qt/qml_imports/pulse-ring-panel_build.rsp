@@ -1,0 +1,11 @@
+-rootPath
+/home/elite/Projects/pulse-ring/tools/qt-panel
+-cmake-output
+-output-file
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/.qt/qml_imports/pulse-ring-panel_build.cmake
+-importPath
+/home/elite/Projects/pulse-ring/tools/qt-panel/build
+-importPath
+/usr/lib/qt6/qml
+-qrcFiles
+/home/elite/Projects/pulse-ring/tools/qt-panel/build/.qt/rcc/qml.qrc

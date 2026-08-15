@@ -308,6 +308,7 @@ fn main() {
     }
 
     let mut cfg = config::Config::load(&config::config_path());
+    let fps = cfg.fps.max(1);
     let audio_rx = audio::start_audio(cfg.sensitivity, cfg.decay);
 
     let conn = Connection::connect_to_env().expect("failed to connect to Wayland");
@@ -475,7 +476,7 @@ fn main() {
         profile: ProfileStats::default(),
         profile_enabled: std::env::var("PULSE_RING_PROFILE").is_ok(),
         profile_frames: 0,
-        interval: std::time::Duration::from_millis(33),
+        interval: std::time::Duration::from_millis((1000 / fps) as u64),
         idle_since: None,
         max_fps: std::env::var("PULSE_RING_MAX_FPS")
             .ok()
@@ -2231,10 +2232,33 @@ impl App {
         }
         log::info!("config changed — hot reload");
         let new_cfg = crate::config::Config::load(&path);
-        // 壁纸变化：重载图片
+        self.interval = std::time::Duration::from_millis((1000 / new_cfg.fps.max(1)) as u64);
+        // 壁纸变化：重载图片 / 重启场景
         let img_changed = new_cfg.image_wallpaper != self.cfg.image_wallpaper;
+        let scene_changed = new_cfg.scene_wallpaper != self.cfg.scene_wallpaper;
         let lua_changed = new_cfg.lua_script != self.cfg.lua_script;
         self.cfg = new_cfg;
+        if scene_changed {
+            // 停止旧场景，启动新场景（或恢复图片）
+            let _ = self.scene_player.take(); // drop: kills Electron + joins reader
+            self.scene_first_frame = false;
+            if let Some(scene) = &self.cfg.scene_wallpaper {
+                if !scene.is_empty() {
+                    let rwp = crate::resolve_wallpaper(scene);
+                    if rwp.kind == "web" {
+                        let (w, h) = self.cfg.web_wallpaper_size;
+                        match crate::web_wallpaper::start_web_wallpaper(&rwp.file, w, h) {
+                            Ok(mut p) => {
+                                p.send_config(&rwp.params);
+                                self.scene_first_frame = true;
+                                self.scene_player = Some(p);
+                            }
+                            Err(e) => log::warn!("scene wallpaper failed ({e})"),
+                        }
+                    }
+                }
+            }
+        }
         if img_changed {
             if let Some(img) = self
                 .cfg
