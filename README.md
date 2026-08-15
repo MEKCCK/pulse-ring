@@ -51,7 +51,7 @@ cargo build --release
 ./target/release/pulse-ring
 ```
 
-基础依赖：Rust/Cargo、PipeWire、Wayland、Vulkan、Fontconfig 和 GStreamer。网���/场景壁纸还需要 Node.js/npm 在项目的 `electron-wallpaper` 目录安装锁定版本 Electron。歌词显示建议安装 JetBrains Maple Mono 或其他 CJK 字体。
+基础依赖：Rust/Cargo、PipeWire、Wayland、Vulkan、Fontconfig 和 GStreamer。网页/场景壁纸还需要 Node.js/npm 在项目的 `electron-wallpaper` 目录安装锁定版本 Electron。歌词显示建议安装 JetBrains Maple Mono 或其他 CJK 字体。
 
 pulse-ring 不会调用系统全局 Electron；如果项目内运行时缺失，会明确提示执行上面的 npm 安装命令。
 
@@ -103,7 +103,7 @@ imageWallpaperMode: "cover"                // cover/contain/stretch
 videoWallpaper: "~/Videos/壁纸.mp4"        // 视频
 videoWallpaperAudio: true                  // 视频是否出声
 webWallpaper: "~/wallpapers/index.html"    // 网页壁纸
-sceneWallpaper: "~/wallpapers/aurora-scene" // 常驻场景，��参与轮播
+sceneWallpaper: "~/wallpapers/aurora-scene" // 常驻场景，不参与轮播
 ```
 
 `sceneWallpaper` 用于持续运行的生活场景；配置后它优先于普通图片/视频轮播。`webWallpaperSize` 默认是 `[960, 540]`，用于控制 Electron 离屏渲染分辨率。
