@@ -3,102 +3,113 @@
 <head>
 <meta charset="utf-8">
 <style>
-  html, body { margin: 0; overflow: hidden; background: radial-gradient(circle at 50% 55%, #12101f, #05040a); }
+  html, body { margin: 0; overflow: hidden; background: #05040c; }
   canvas { position: absolute; inset: 0; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <script>
-// 场景壁纸：音频驱动的粒子系统（pulse-ring 音频 API）
-// window.pulseRing.onBands() 每帧提供 128 频段 + 能量 + bass/mid/treble
+// 场景壁纸：高可见度的常驻动画（旋转星云 + 轨迹粒子 + 能量脉冲）
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 let W, H, DPR;
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  DPR = 1; // 壁纸画布 1:1，保证每帧渲染快、画面流畅
   W = canvas.width = innerWidth * DPR;
   H = canvas.height = innerHeight * DPR;
 }
 resize();
 addEventListener('resize', resize);
 
-const cfg = { particles: 120, baseHue: 262 }; // 会被 manifest params 覆盖
-window.pulseRing.onConfig((c) => Object.assign(cfg, c));
-
-// 粒子：中心向外弹射，随音频能量脉冲
-const P = [];
-function spawn() {
-  const ang = Math.random() * Math.PI * 2;
-  return {
-    x: W/2, y: H/2,
-    vx: Math.cos(ang) * (0.5 + Math.random() * 1.5),
-    vy: Math.sin(ang) * (0.5 + Math.random() * 1.5),
-    size: (2 + Math.random() * 4) * DPR,
-    hue: cfg.baseHue + Math.random() * 60,
-    life: 1,
-  };
-}
-for (let i = 0; i < cfg.particles; i++) P.push(spawn());
-
+const cfg = { particles: 80, baseHue: 262, spin: 0.3 };
 let energy = 0, bass = 0, mid = 0, treble = 0, bands = null;
+// 音频 API 可选：存在才订阅，不存在时场景依然以 ambient 动画运行。
+if (window.pulseRing) {
+  window.pulseRing.onConfig((c) => Object.assign(cfg, c));
+  window.pulseRing.onBands((d) => { bands = d.bands; energy = d.energy; bass = d.bass; mid = d.mid; treble = d.treble; });
+}
 
-window.pulseRing.onBands((d) => {
-  bands = d.bands;
-  energy = d.energy;
-  bass = d.bass;
-  mid = d.mid;
-  treble = d.treble;
-});
+// 粒子：环绕中心的星尘（半径脉动 + 拖尾），低音时被甩出去
+const P = [];
+for (let i = 0; i < cfg.particles; i++) {
+  P.push({
+    r: 0.04 + Math.random() * 0.5,
+    a: Math.random() * Math.PI * 2,
+    w: (0.15 + Math.random() * 0.25) * (Math.random() < 0.5 ? 1 : -1),
+    bob: Math.random() * Math.PI * 2,
+    size: (1.2 + Math.random() * 2.4) * DPR,
+    hue: (cfg.baseHue + Math.random() * 90) % 360,
+  });
+}
+
+// 星云团（慢速旋转光斑）
+const NEB = [];
+for (let i = 0; i < 5; i++) {
+  NEB.push({ a: (i / 5) * Math.PI * 2, r: 0.18 + i * 0.07, size: 0.3 + Math.random() * 0.2, hue: (cfg.baseHue + i * 30) % 360 });
+}
 
 let t = 0;
 function frame() {
   t += 0.016;
-  // 能量平滑（上升快、衰减慢）
-  const target = energy * (0.4 + bass * 0.6);
-  const pulse = target > energy ? target : energy * 0.9;
 
-  ctx.fillStyle = 'rgba(5, 4, 10, 0.28)'; // 半透明拖影
+  // 拖影背景（运动可见性关键）
+  ctx.fillStyle = 'rgba(5, 4, 12, 0.30)';
   ctx.fillRect(0, 0, W, H);
 
-  // 中心光晕随能量
-  const glowR = 120 * DPR + pulse * 300 * DPR;
-  const g = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, glowR);
-  g.addColorStop(0, `hsla(${cfg.baseHue}, 80%, 60%, ${0.25 + pulse * 0.4})`);
-  g.addColorStop(1, 'transparent');
-  ctx.fillStyle = g;
+  // 旋转星云（明显转动）
+  for (const n of NEB) {
+    n.a += (cfg.spin * 0.008 + energy * 0.02) * (n.r < 0.3 ? 1 : -1);
+    const cx = W/2 + Math.cos(n.a) * n.r * W;
+    const cy = H/2 + Math.sin(n.a * 1.3) * n.r * H;
+    const rr = n.size * W * (0.7 + energy * 0.8);
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rr);
+    g.addColorStop(0, `hsla(${n.hue}, 75%, ${45 + energy * 25}%, ${0.13 + energy * 0.1})`);
+    g.addColorStop(1, 'transparent');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // 中心脉冲光晕（明显呼吸 + 能量爆发）
+  const breathe = 0.7 + 0.3 * Math.sin(t * 2.2);
+  const glowR = (150 + 80 * breathe + energy * 380) * DPR;
+  const cg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, glowR);
+  cg.addColorStop(0, `hsla(${cfg.baseHue}, 85%, ${58 + energy * 22}%, ${0.22 * breathe + energy * 0.4})`);
+  cg.addColorStop(0.6, `hsla(${(cfg.baseHue + 40) % 360}, 70%, 50%, ${0.08 * breathe})`);
+  cg.addColorStop(1, 'transparent');
+  ctx.fillStyle = cg;
   ctx.fillRect(0, 0, W, H);
 
-  // 粒子：bass 时向外弹射加速，treble 时抖动
+  // 粒子：环绕 + 拖尾（低音甩出、高频抖动）
   for (const p of P) {
-    p.vx *= 0.99; p.vy *= 0.99;
-    p.vx += (Math.random() - 0.5) * treble * 0.8;
-    p.vy += (Math.random() - 0.5) * treble * 0.8;
-    if (Math.random() < bass * 0.15) { // 低音脉冲重新弹射
-      const ang = Math.random() * Math.PI * 2;
-      const sp = 2 + bass * 6;
-      p.vx = Math.cos(ang) * sp; p.vy = Math.sin(ang) * sp;
-    }
-    p.x += p.vx * DPR; p.y += p.vy * DPR;
-    // 回到中心
-    const dx = W/2 - p.x, dy = H/2 - p.y;
-    p.x += dx * 0.004; p.y += dy * 0.004;
+    p.a += p.w * (0.02 + energy * 0.06);
+    p.bob += 0.03 + energy * 0.08 + treble * 0.05;
+    let r = p.r + Math.sin(p.bob) * 0.10;
+    if (bass > 0.1 && Math.random() < bass * 0.2) r += bass * 0.3;
+    const px = W/2 + Math.cos(p.a) * r * W * 0.5;
+    const py = H/2 + Math.sin(p.a) * r * H * 0.5 + Math.sin(p.bob * 1.4) * 30 * DPR;
+    const s = p.size * (1 + energy * 1.1);
     ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size * (1 + pulse), 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${p.hue}, 85%, ${60 + pulse * 30}%, ${0.6 + pulse * 0.4})`;
+    ctx.arc(px, py, s, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${p.hue}, 90%, ${65 + energy * 25}%, ${0.7 + energy * 0.3})`;
     ctx.fill();
   }
 
-  // 底部频谱条（低频更宽）
+  // 频谱弧（中心周围的能量环）
   if (bands) {
-    const bw = W / 64;
-    const bh = H * 0.12;
-    for (let i = 0; i < 64; i++) {
-      const v = bands[Math.floor(i * 2)] * bh;
-      ctx.fillStyle = `hsla(${cfg.baseHue + i}, 80%, 60%, 0.5)`;
-      ctx.fillRect(i * bw, H - v, bw * 0.7, v);
+    const arcs = 40;
+    for (let i = 0; i < arcs; i++) {
+      const v = bands[Math.floor(i * 3.2)];
+      const ang0 = (i / arcs) * Math.PI * 2 - Math.PI / 2;
+      const r0 = (0.24 + v * 0.5) * W * 0.5;
+      ctx.beginPath();
+      ctx.arc(W/2, H/2, r0, ang0, ang0 + 0.12);
+      ctx.strokeStyle = `hsla(${(cfg.baseHue + i * 6) % 360}, 85%, ${55 + v * 30}%, ${0.5 + v * 0.4})`;
+      ctx.lineWidth = (3 + v * 6) * DPR;
+      ctx.stroke();
     }
   }
+
   requestAnimationFrame(frame);
 }
 frame();

@@ -227,6 +227,9 @@ struct App {
     /// Web wallpaper player (Electron offscreen HTML renderer). Frames flow like video.
     web_player: Option<web_wallpaper::WebWallpaperPlayer>,
     web_first_frame: bool,
+    /// Persistent scene wallpaper player (never rotated).
+    scene_player: Option<web_wallpaper::WebWallpaperPlayer>,
+    scene_first_frame: bool,
     /// Force a full wallpaper upload (promote + mipmap) once, for the first video frame.
     wallpaper_force_upload: bool,
     /// Only log the first wallpaper upload (video re-uploads every frame).
@@ -350,6 +353,24 @@ fn main() {
         }
     }
     let video_first_frame = video_player.is_some();
+    // SCENE wallpaper: a living environment, persistent (never rotated away).
+    let mut scene_player = None;
+    let mut scene_first_frame = false;
+    if let Some(scene) = &cfg.scene_wallpaper {
+        let (resolved, kind, params_json) = resolve_wallpaper(scene);
+        if kind == "web" {
+            let (w, h) = cfg.web_wallpaper_size;
+            log::info!("scene wallpaper: starting {resolved}");
+            match web_wallpaper::start_web_wallpaper(&resolved, w, h) {
+                Ok(mut p) => {
+                    p.send_config(&params_json);
+                    scene_first_frame = true;
+                    scene_player = Some(p);
+                }
+                Err(e) => log::warn!("scene wallpaper failed ({e})"),
+            }
+        }
+    }
     // Web wallpaper (HTML) — standalone, takes precedence over image but co-exists
     // with the rotation list handling (entries starting with .html).
     let mut web_player = None;
@@ -402,6 +423,8 @@ fn main() {
         video_first_frame,
         web_player,
         web_first_frame,
+        scene_player,
+        scene_first_frame,
         wallpaper_force_upload: false,
         log_once_wallpaper: true,
         wallpaper_list,
@@ -2106,6 +2129,21 @@ impl App {
                 }
             }
         }
+        if let Some(player) = &mut self.scene_player {
+            player.send_audio(&self.bands, self.ring_amp_smooth);
+            if let Some(frame) = web_wallpaper::drain_web(&player.rx) {
+                self.wallpaper_image = Some(ImageData {
+                    w: frame.width,
+                    h: frame.height,
+                    rgba: frame.rgba,
+                });
+                self.wallpaper_dirty = true;
+                if self.scene_first_frame {
+                    self.scene_first_frame = false;
+                    self.wallpaper_force_upload = true;
+                }
+            }
+        }
         if let Some(player) = &mut self.web_player {
             // 音频 API：把本帧频段 + 整体能量推给网页壁纸（JS 可读）
             let energy: f32 = self.ring_amp_smooth;
@@ -2151,7 +2189,8 @@ impl App {
     /// Advance the rotating-wallpaper transition and switch to the next image when the
     /// interval elapses. Video wallpaper bypasses rotation (holds progress at 1.0).
     fn tick_wallpaper_rotation(&mut self) {
-        if self.wallpaper_list.is_empty() {
+        // A scene is the living wallpaper — rotation only applies to image/video lists.
+        if self.scene_player.is_some() || self.wallpaper_list.is_empty() {
             self.wallpaper_progress = 1.0;
             return;
         }
@@ -2377,7 +2416,9 @@ fn pull_audio(&mut self) {
         renderer.set_transition_name(&self.cfg.wallpaper_transition_effect);
         if self.wallpaper_dirty {
             if let Some(img) = &self.wallpaper_image {
-                if (self.video_player.is_some() || self.web_player.is_some()) && !self.wallpaper_force_upload {
+                if (self.video_player.is_some() || self.web_player.is_some() || self.scene_player.is_some())
+                    && !self.wallpaper_force_upload
+                {
                     // Video/web: reuse the texture (same size), no mipmap generation per frame.
                     renderer.update_wallpaper(&img.rgba, img.w, img.h);
                 } else {

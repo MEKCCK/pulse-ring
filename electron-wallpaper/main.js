@@ -46,7 +46,8 @@ function pump() {
 }
 
 app.commandLine.appendSwitch('ozone-platform', 'x11');
-app.disableHardwareAcceleration(); // 壁纸场景 CPU 渲染足够，避免 GPU 冲突
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
 // ---- 从 stdin 读取 pulse-ring 推送的数据（帧协议）----
 //   tag 0x00：音频帧，516 字节（128 f32 频段 + 1 f32 能量）
 //   tag 0x01：配置帧，4 字节长度 + JSON

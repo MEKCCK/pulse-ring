@@ -332,6 +332,9 @@ pub struct Config {
     pub video_wallpaper_audio: bool,
     /// Optional web wallpaper (HTML page, rendered offscreen via Electron).
     pub web_wallpaper: Option<String>,
+    /// Persistent SCENE wallpaper (folder with project.json type:"scene", or an HTML
+    /// file). A scene is a living environment — it is NOT part of the rotation.
+    pub scene_wallpaper: Option<String>,
     /// Render size for the web wallpaper (screen-sized by default).
     pub web_wallpaper_size: (u32, u32),
     /// Rotating image wallpaper list (each entry is a path); empty = no rotation.
@@ -421,6 +424,7 @@ impl Default for Config {
             video_wallpaper: None,
             video_wallpaper_audio: true,
             web_wallpaper: None,
+            scene_wallpaper: None,
             web_wallpaper_size: (1920, 1080),
             wallpapers: Vec::new(),
             wallpaper_interval: 30.0,
@@ -982,6 +986,11 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
         "webWallpaper" => {
             if let Val::Str(s) = v {
                 cfg.web_wallpaper = Some(s.clone());
+            }
+        }
+        "sceneWallpaper" => {
+            if let Val::Str(s) = v {
+                cfg.scene_wallpaper = Some(s.clone());
             }
         }
         "wallpapers" => {
