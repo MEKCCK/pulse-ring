@@ -1,0 +1,7 @@
+{
+  "name": "pulse-ring-web-wallpaper",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "description": "Offscreen HTML wallpaper renderer for pulse-ring"
+}

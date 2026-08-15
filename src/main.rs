@@ -29,6 +29,7 @@ mod lyrics;
 mod plugin;
 mod transitions;
 mod video_wallpaper;
+mod web_wallpaper;
 use audio::NBANDS;
 use draw::RingRenderer;
 
@@ -222,6 +223,9 @@ struct App {
     /// True on the first frame of a new video session — it should trigger a
     /// crossfade transition (upload_wallpaper promotes the old frame to prev).
     video_first_frame: bool,
+    /// Web wallpaper player (Electron offscreen HTML renderer). Frames flow like video.
+    web_player: Option<web_wallpaper::WebWallpaperPlayer>,
+    web_first_frame: bool,
     /// Force a full wallpaper upload (promote + mipmap) once, for the first video frame.
     wallpaper_force_upload: bool,
     /// Only log the first wallpaper upload (video re-uploads every frame).
@@ -345,7 +349,26 @@ fn main() {
         }
     }
     let video_first_frame = video_player.is_some();
-    let wallpaper_dirty = wallpaper_dirty || video_player.is_some();
+    // Web wallpaper (HTML) — standalone, takes precedence over image but co-exists
+    // with the rotation list handling (entries starting with .html).
+    let mut web_player = None;
+    let mut web_first_frame = false;
+    if cfg.wallpapers.is_empty() {
+        if let Some(html) = &cfg.web_wallpaper {
+            if web_wallpaper::is_html_path(html) {
+                let (w, h) = cfg.web_wallpaper_size;
+                log::info!("web wallpaper: starting {html}");
+                match web_wallpaper::start_web_wallpaper(html, w, h) {
+                    Ok(p) => {
+                        web_first_frame = true;
+                        web_player = Some(p);
+                    }
+                    Err(e) => log::warn!("web wallpaper failed ({e})"),
+                }
+            }
+        }
+    }
+    let wallpaper_dirty = wallpaper_dirty || video_player.is_some() || web_player.is_some();
     let mut app = App {
         compositor,
         layer_shell,
@@ -374,6 +397,8 @@ fn main() {
         wallpaper_dirty,
         video_player,
         video_first_frame,
+        web_player,
+        web_first_frame,
         wallpaper_force_upload: false,
         log_once_wallpaper: true,
         wallpaper_list,
@@ -2062,6 +2087,20 @@ impl App {
                 }
             }
         }
+        if let Some(player) = &self.web_player {
+            if let Some(frame) = web_wallpaper::drain_web(&player.rx) {
+                self.wallpaper_image = Some(ImageData {
+                    w: frame.width,
+                    h: frame.height,
+                    rgba: frame.rgba,
+                });
+                self.wallpaper_dirty = true;
+                if self.web_first_frame {
+                    self.web_first_frame = false;
+                    self.wallpaper_force_upload = true;
+                }
+            }
+        }
         self.tick_wallpaper_rotation();
         let scene = self.compute_scene();
         // With an image wallpaper configured, every monitor shows it (wallpaper-engine
@@ -2103,9 +2142,18 @@ impl App {
         if progress >= 1.0 && elapsed >= self.wallpaper_switch_at {
             self.wallpaper_idx = (self.wallpaper_idx + 1) % self.wallpaper_list.len();
             let path = &self.wallpaper_list[self.wallpaper_idx];
-            if video_wallpaper::is_video_path(path) {
-                // Start a video entry; its first frame triggers the crossfade.
-                self.video_player = None;
+            self.video_player = None;
+            self.web_player = None;
+            if web_wallpaper::is_html_path(path) {
+                let (w, h) = self.cfg.web_wallpaper_size;
+                match web_wallpaper::start_web_wallpaper(path, w, h) {
+                    Ok(p) => {
+                        self.web_player = Some(p);
+                        self.web_first_frame = true;
+                    }
+                    Err(e) => log::warn!("web wallpaper failed ({e})"),
+                }
+            } else if video_wallpaper::is_video_path(path) {
                 match video_wallpaper::start_video_wallpaper(path, self.cfg.video_wallpaper_audio) {
                     Ok(p) => {
                         self.video_player = Some(p);
@@ -2113,13 +2161,9 @@ impl App {
                     }
                     Err(e) => log::warn!("video wallpaper failed ({e})"),
                 }
-            } else {
-                // Stop any running video, load the image.
-                self.video_player = None;
-                if let Some(img) = load_image_raw(path) {
-                    self.wallpaper_image = Some(img);
-                    self.wallpaper_dirty = true;
-                }
+            } else if let Some(img) = load_image_raw(path) {
+                self.wallpaper_image = Some(img);
+                self.wallpaper_dirty = true;
             }
             self.wallpaper_transition_start = elapsed;
             self.wallpaper_switch_at = elapsed + self.cfg.wallpaper_interval;
@@ -2298,8 +2342,8 @@ impl App {
         renderer.set_transition_name(&self.cfg.wallpaper_transition_effect);
         if self.wallpaper_dirty {
             if let Some(img) = &self.wallpaper_image {
-                if self.video_player.is_some() && !self.wallpaper_force_upload {
-                    // Video: reuse the texture (same size), no mipmap generation per frame.
+                if (self.video_player.is_some() || self.web_player.is_some()) && !self.wallpaper_force_upload {
+                    // Video/web: reuse the texture (same size), no mipmap generation per frame.
                     renderer.update_wallpaper(&img.rgba, img.w, img.h);
                 } else {
                     renderer.upload_wallpaper(&img.rgba, img.w, img.h);

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {
+    margin: 0; overflow: hidden; background: radial-gradient(circle at 30% 40%, #1a237e, #000000);
+    font-family: "Noto Sans CJK SC", sans-serif; color: #EADDFF;
+    display: flex; align-items: center; justify-content: center; height: 100vh;
+  }
+  .clock {
+    font-size: 120px; font-weight: bold;
+    background: linear-gradient(90deg, #FFD740, #EADDFF, #7C4DFF);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    text-shadow: 0 0 40px rgba(255, 215, 64, 0.4);
+  }
+  .particle { position: absolute; width: 8px; height: 8px; border-radius: 50%;
+    background: #D0BCFF; animation: float 6s infinite ease-in-out; }
+  @keyframes float {
+    0%   { transform: translate(0, 0) scale(1); opacity: 0; }
+    50%  { transform: translate(60px, -80px) scale(1.4); opacity: 0.9; }
+    100% { transform: translate(-40px, -160px) scale(0.6); opacity: 0; }
+  }
+  .motto { position: absolute; bottom: 8%; font-size: 24px; letter-spacing: 6px;
+    background: linear-gradient(90deg, #EADDFF, #B388FF);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+</style>
+</head>
+<body>
+  <div class="clock" id="clock">00:00:00</div>
+  <div class="motto">PULSE-RING · WEB WALLPAPER</div>
+  <script>
+    for (let i = 0; i < 24; i++) {
+      const p = document.createElement('div');
+      p.className = 'particle';
+      p.style.left = (Math.random() * 100) + '%';
+      p.style.top = (Math.random() * 100) + '%';
+      p.style.animationDelay = (Math.random() * 6) + 's';
+      document.body.appendChild(p);
+    }
+    const pad = n => String(n).padStart(2, '0');
+    setInterval(() => {
+      const d = new Date();
+      document.getElementById('clock').textContent =
+        pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    }, 1000);
+  </script>
+</body>
+</html>

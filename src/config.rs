@@ -330,6 +330,10 @@ pub struct Config {
     pub video_wallpaper: Option<String>,
     /// Whether video wallpapers play their audio through the default sink.
     pub video_wallpaper_audio: bool,
+    /// Optional web wallpaper (HTML page, rendered offscreen via Electron).
+    pub web_wallpaper: Option<String>,
+    /// Render size for the web wallpaper (screen-sized by default).
+    pub web_wallpaper_size: (u32, u32),
     /// Rotating image wallpaper list (each entry is a path); empty = no rotation.
     pub wallpapers: Vec<String>,
     /// Seconds between wallpaper rotations (only used with `wallpapers`).
@@ -416,6 +420,8 @@ impl Default for Config {
             image_wallpaper_mode: WallpaperMode::Cover,
             video_wallpaper: None,
             video_wallpaper_audio: true,
+            web_wallpaper: None,
+            web_wallpaper_size: (1920, 1080),
             wallpapers: Vec::new(),
             wallpaper_interval: 30.0,
             wallpaper_transition: 1.2,
@@ -973,6 +979,11 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
             }
         }
         "videoWallpaperAudio" => cfg.video_wallpaper_audio = num(v).unwrap_or(1.0) > 0.5,
+        "webWallpaper" => {
+            if let Val::Str(s) = v {
+                cfg.web_wallpaper = Some(s.clone());
+            }
+        }
         "wallpapers" => {
             if let Val::Arr(items) = v {
                 cfg.wallpapers.clear();
