@@ -125,7 +125,9 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
                     break;
                 }
                 if pending.is_none() {
-                    // Read the 8-byte header.
+                    // Read the 8-byte header. If the stream is desynced (Electron/
+                    // Chromium printed junk on stdout at startup), resync by
+                    // scanning for a plausible header instead of dying.
                     let mut hdr = [0u8; 8];
                     let mut got = 0;
                     while got < 8 {
@@ -135,11 +137,22 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
                             Err(_) => return,
                         }
                     }
-                    let w = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-                    let h = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-                    if w == 0 || h == 0 || w > 8192 || h > 8192 {
-                        log::error!("web reader: BAD header {w}x{h} — stream desync");
-                        return;
+                    let mut w = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+                    let mut h = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+                    while !(w > 0 && w <= 8192 && h > 0 && h <= 8192 && (w * h * 4) < 256 * 1024 * 1024) {
+                        // shift left by one byte and read one more
+                        hdr.copy_within(1.., 0);
+                        match reader.read(&mut hdr[7..]) {
+                            Ok(0) => return,
+                            Ok(n) if n > 0 => {}
+                            Err(_) => return,
+                            _ => {}
+                        }
+                        w = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+                        h = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+                    }
+                    if got > 8 || w != 960 {
+                        log::info!("web reader: resynced to {w}x{h} (discarded {} junk bytes)", got.saturating_sub(8));
                     }
                     pending = Some((w, h));
                 }

@@ -30,7 +30,7 @@ Wayland 壁纸层上的音乐律动可视化（GPU 渲染，wgpu/Vulkan）。
 - **星环效果**：连续半透明环带 + 粒子环绕
 - **Widgets**：模拟时钟、数字时钟、专辑封面（MPRIS 实时）、条形频谱（含镜像）、独立圆环、**歌词（LRC 逐字卡拉OK）**，自由放置
 - **壁纸引擎**：静态图片（`imageWallpaper`，cover/contain/stretch + 完整 mipmap 链）、视频壁纸（GStreamer 硬件解码，音频可选）、多壁纸轮播（图片/视频混排）、**50+ 种 GLSL 切换动画**（fade/circleopen/crosszoom/glitchmemories…，`wallpaperTransitionEffect` 可选）、**壁纸打包**（文件夹 + `project.json` 清单，三种类型统一入口）
-- ⚠️ **网页壁纸（HTML/CSS/JS/场景）：不稳定半成品，易卡死** —— Electron 离屏渲染在部分环境可能卡顿/冻结，建议优先使用图片/视频壁纸
+- **网页壁纸（HTML/CSS/JS/场景）**：Electron 离屏渲染 + 音频驱动场景，支持实时音频联动（频段/能量经安全管道推送）
 - **歌词**：本地 `~/.config/pulse-ring/lyrics/*.lrc` 优先，在线回退 QQ 音乐 → Lrclib（时长校验防错歌）并缓存；跟随 MPRIS 播放进度，行级点亮高亮 + 上一/下一行预览
 - **魔法阵启动动画**：三层环波浪展开 + 旋转 + 前沿光环
 - **Lua 插件**：`onUpdate` / `transformBands` / `pulse.*` API，动态控制一切

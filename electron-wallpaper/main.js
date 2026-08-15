@@ -151,7 +151,11 @@ app.whenReady().then(() => {
   // 隐藏窗口的离屏 paint 事件只触发前 1-2 帧就停止（Electron 已知行为），
   // 改用 capturePage 定时抓帧：稳定 ~30fps。
   const captureTimer = () => {
-    if (paused || !win || win.isDestroyed()) return;
+    // 定时器链必须永远延续：paused（stdout 忙）时只跳过本帧，绝不断链，
+    // 否则管道一忙就永久停帧（表现为"跑一会儿卡住"）。
+    if (!win || win.isDestroyed()) return;
+    const schedule = () => setTimeout(captureTimer, 33); // ~30fps
+    if (paused) { schedule(); return; }
     win.webContents.capturePage()
       .then((image) => {
         const size = image.getSize();
@@ -167,7 +171,7 @@ app.whenReady().then(() => {
         writeFrame(rgba);
       })
       .catch(() => {})
-      .finally(() => setTimeout(captureTimer, 33)); // ~30fps
+      .finally(schedule);
   };
   setTimeout(captureTimer, 300); // 等页面加载后开始
 
