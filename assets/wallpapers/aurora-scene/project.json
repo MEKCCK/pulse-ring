@@ -1,0 +1,7 @@
+{
+  "type": "scene",
+  "title": "极光声场",
+  "file": "index.html",
+  "audio": true,
+  "params": { "baseHue": 188, "trails": 0.16, "spectrum": true }
+}
