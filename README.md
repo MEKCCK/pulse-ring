@@ -104,6 +104,7 @@ videoWallpaper: "~/Videos/壁纸.mp4"        // 视频
 videoWallpaperAudio: true                  // 视频是否出声
 webWallpaper: "~/wallpapers/index.html"    // 网页壁纸
 sceneWallpaper: "~/wallpapers/aurora-scene" // 常驻场景，不参与轮播
+wallpaperLayer: "auto"                      // 壁纸层：auto=KDE 用 bottom（防录屏覆盖），其余 background（透明窗口可见）；可手动 background/bottom
 ```
 
 `sceneWallpaper` 用于持续运行的生活场景；配置后它优先于普通图片/视频轮播。`webWallpaperSize` 默认是 `[960, 540]`，用于控制 Electron 离屏渲染分辨率。
