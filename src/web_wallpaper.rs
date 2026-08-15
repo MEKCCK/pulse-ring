@@ -71,9 +71,34 @@ impl Drop for WebWallpaperPlayer {
 
 /// Use the Electron version pinned by this project. A system-wide Electron can
 /// have a different Chromium/Node ABI and must never affect wallpaper behavior.
+/// Locate the Electron helper entry (main.js): project dir, else system install.
+fn web_helper_path() -> std::path::PathBuf {
+    let proj = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("electron-wallpaper/main.js");
+    if proj.is_file() {
+        return proj;
+    }
+    let sys = std::path::PathBuf::from("/usr/share/pulse-ring/electron-wallpaper/main.js");
+    if sys.is_file() {
+        return sys;
+    }
+    proj
+}
+
 fn electron_binary() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("electron-wallpaper/node_modules/.bin/electron")
+    // 1. 开发：项目内锁定的 Electron（PR #4 固定版本）
+    let proj = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("electron-wallpaper/node_modules/.bin/electron");
+    if proj.is_file() {
+        return proj;
+    }
+    // 2. 回退：系统 Electron 命令（版本可能不同，但可用）
+    if let Ok(out) = std::process::Command::new("electron").arg("--version").output() {
+        if out.status.success() {
+            return std::path::PathBuf::from("electron");
+        }
+    }
+    proj
 }
 
 /// Start rendering `html_path` at `width`x`height` via Electron offscreen.
@@ -85,10 +110,7 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
             electron.display()
         ));
     }
-    let helper = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/electron-wallpaper/main.js"
-    );
+    let helper = web_helper_path();
     let abs_html = if std::path::Path::new(html_path).is_absolute() {
         html_path.to_string()
     } else {
@@ -100,7 +122,7 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
     };
 
     let mut child = Command::new(&electron)
-        .args([helper, &abs_html, &width.to_string(), &height.to_string()])
+        .args([helper.to_string_lossy().to_string(), abs_html, width.to_string(), height.to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

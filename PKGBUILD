@@ -37,7 +37,14 @@ package() {
   install -Dm644 icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/pulse-ring.svg"
   install -Dm644 icon.svg "$pkgdir/usr/share/pixmaps/pulse-ring.svg"
   install -Dm644 pulse-ring-panel.desktop "$pkgdir/usr/share/applications/pulse-ring-panel.desktop"
-  # 内置壁纸预设（网页/场景壁纸从编译期目录读取，需打包完整资源）
+  # 运行时资源（打包安装后二进制按 /usr/share/pulse-ring/ 查找）
+  # 1) 网页壁纸 Electron helper（main.js/preload.js）
+  install -Dm644 electron-wallpaper/main.js "$pkgdir/usr/share/pulse-ring/electron-wallpaper/main.js"
+  install -Dm644 electron-wallpaper/preload.js "$pkgdir/usr/share/pulse-ring/electron-wallpaper/preload.js"
+  install -Dm644 electron-wallpaper/package.json "$pkgdir/usr/share/pulse-ring/electron-wallpaper/package.json"
+  # 2) 50+ 种 GLSL 过渡着色器
+  install -Dm644 assets/shaders/transitions/*.glsl "$pkgdir/usr/share/pulse-ring/assets/shaders/transitions/"
+  # 3) 内置壁纸预设（首次运行自动部署到 ~/.config/pulse-ring/wallpapers/）
   install -Dm644 assets/wallpapers/presets.json "$pkgdir/usr/share/pulse-ring/assets/wallpapers/presets.json"
   for d in audio-scene aurora-scene demo-clock.html; do
     if [ -e "assets/wallpapers/$d" ]; then

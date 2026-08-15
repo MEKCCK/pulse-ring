@@ -124,13 +124,20 @@ pub fn compile(name: &str, glsl: &str) -> Result<(String, String), String> {
 
 /// Path of a built-in transition by name (case-insensitive), e.g. "circleopen".
 pub fn transition_path(name: &str) -> Option<String> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/transitions");
-    let lower = name.to_ascii_lowercase();
-    for entry in std::fs::read_dir(dir).ok()? {
-        let path = entry.ok()?.path();
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if stem.to_ascii_lowercase() == lower {
-                return Some(path.to_string_lossy().to_string());
+    // 开发：项目着色器目录；打包安装：系统资源目录（/usr/share/pulse-ring/）
+    for dir in [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/transitions"),
+        "/usr/share/pulse-ring/assets/shaders/transitions",
+    ] {
+        let lower = name.to_ascii_lowercase();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem.to_ascii_lowercase() == lower {
+                        return Some(path.to_string_lossy().to_string());
+                    }
+                }
             }
         }
     }

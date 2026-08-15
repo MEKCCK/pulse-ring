@@ -1130,6 +1130,42 @@ fn ensure_defaults() {
             log::info!("wrote default lua to {}", lua.display());
         }
     }
+    // 打包安装：壁纸库为空时，把系统预设部署到用户壁纸库
+    // （~/.config/pulse-ring/wallpapers/，用户可见可编辑，面板按此目录扫描）
+    let lib = dir.join("wallpapers");
+    if !lib.exists() {
+        let _ = std::fs::create_dir_all(&lib);
+        let sys = std::path::PathBuf::from("/usr/share/pulse-ring/assets/wallpapers");
+        if sys.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&sys) {
+                for e in entries.flatten() {
+                    let from = e.path();
+                    let to = lib.join(e.file_name());
+                    if from.is_dir() {
+                        let _ = copy_dir_recursive(&from, &to);
+                    } else {
+                        let _ = std::fs::copy(&from, &to);
+                    }
+                }
+                log::info!("deployed wallpaper presets to {}", lib.display());
+            }
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let e = entry?;
+        let from = e.path();
+        let to = dst.join(e.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn config_path() -> std::path::PathBuf {
