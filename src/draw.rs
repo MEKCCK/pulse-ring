@@ -62,6 +62,9 @@ pub struct RingRenderer {
     atlas_rejection_warned: std::collections::HashSet<usize>,
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Mipmap blit pipeline (lazy): downsamples each wallpaper mip from the previous one.
+    mipmap_pipeline: Option<wgpu::RenderPipeline>,
+    mipmap_layout: Option<wgpu::BindGroupLayout>,
     /// Full-screen wallpaper texture (image wallpaper mode), behind everything.
     wallpaper_texture: Option<wgpu::Texture>,
     wallpaper_view: Option<wgpu::TextureView>,
@@ -249,6 +252,7 @@ impl RingRenderer {
             label: Some("widget sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
@@ -366,6 +370,8 @@ impl RingRenderer {
             atlas_rejection_warned: std::collections::HashSet::new(),
             sampler: sampler.clone(),
             bind_group_layout: bind_group_layout.clone(),
+            mipmap_pipeline: None,
+            mipmap_layout: None,
             wallpaper_texture: None,
             wallpaper_view: None,
             wallpaper_placeholder_view: wp_placeholder_view.clone(),
@@ -448,19 +454,24 @@ impl RingRenderer {
         }
     }
 
-    /// Upload (or replace) the full-screen wallpaper texture.
+    /// Upload (or replace) the full-screen wallpaper texture. Generates a full mipmap
+    /// chain so large images stay crisp when downscaled to the screen (Kaleidux-style;
+    /// a single-level texture aliases/shimmer when minified).
     pub fn upload_wallpaper(&mut self, rgba: &[u8], w: u32, h: u32) {
         if w == 0 || h == 0 {
             return;
         }
+        let mip_count = ((w.max(h) as f32).log2().floor() as u32) + 1;
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("wallpaper"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
+            mip_level_count: mip_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -481,7 +492,152 @@ impl RingRenderer {
         );
         self.wallpaper_texture = Some(tex);
         self.wallpaper_view = Some(view);
+        self.generate_mipmaps();
         self.refresh_texture_bindings();
+    }
+
+    /// Blit each wallpaper mip level from the previous one (box-ish downsample via the
+    /// linear sampler), so minification is smooth instead of shimmering.
+    fn generate_mipmaps(&mut self) {
+        let Some(tex) = self.wallpaper_texture.as_ref() else { return };
+        let mip_count = tex.mip_level_count();
+        if mip_count <= 1 {
+            return;
+        }
+        // Lazy blit pipeline: fullscreen triangle (vs_main) + fragment sampling the
+        // source mip with the linear sampler — a box-style downsample per level.
+        if self.mipmap_pipeline.is_none() {
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("mipmap"),
+                source: wgpu::ShaderSource::Wgsl(
+                    r#"
+                    struct VsOut { @builtin(position) pos: vec4<f32> }
+                    @vertex
+                    fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+                        let p = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+                        return VsOut(vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0));
+                    }
+                    @group(0) @binding(0) var src_tex: texture_2d<f32>;
+                    @group(0) @binding(1) var samp: sampler;
+                    @fragment
+                    fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                        let dims = vec2<f32>(textureDimensions(src_tex));
+                        return textureSample(src_tex, samp, pos.xy / dims);
+                    }
+                    "#
+                    .into(),
+                ),
+            });
+            let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mipmap bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+            let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("mipmap pl"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mipmap pipeline"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.mipmap_layout = Some(layout);
+            self.mipmap_pipeline = Some(pipeline);
+        }
+        let pipeline = self.mipmap_pipeline.as_ref().unwrap();
+        let layout = self.mipmap_layout.as_ref().unwrap();
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mipmap") });
+        for i in 1..mip_count {
+            let src_view = tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("wp mip src {i}")),
+                base_mip_level: i - 1,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            let dst_view = tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("wp mip dst {i}")),
+                base_mip_level: i,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mipmap bg"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            let _ = (0u32);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mipmap pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+            drop(pass);
+        }
+        self.queue.submit(Some(encoder.finish()));
     }
 
     /// Wallpaper fit mode: 0 = cover (crop), 1 = contain (letterbox), 2 = stretch.

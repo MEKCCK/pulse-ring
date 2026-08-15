@@ -28,6 +28,7 @@ Wayland 壁纸层上的音乐律动可视化（GPU 渲染，wgpu/Vulkan）。
 - **形状系统**：ring / square / diamond / hexagon / triangle / star / flower，旋转、虚线
 - **星环效果**：连续半透明环带 + 粒子环绕
 - **Widgets**：模拟时钟、数字时钟、专辑封面（MPRIS 实时）、条形频谱（含镜像）、独立圆环、**歌词（LRC 逐字卡拉OK）**，自由放置
+- **图片壁纸**：`imageWallpaper` 指定图片，`imageWallpaperMode` 选 cover/contain/stretch，完整 mipmap 链缩放不闪烁（壁纸引擎基础功能）
 - **歌词**：本地 `~/.config/pulse-ring/lyrics/*.lrc` 优先，自动回退在线获取（Lrclib）并缓存；跟随 MPRIS 播放进度，当前行高亮 + 逐字卡拉OK着色 + 上一/下一行预览
 - **魔法阵启动动画**：三层环波浪展开 + 旋转 + 前沿光环
 - **Lua 插件**：`onUpdate` / `transformBands` / `pulse.*` API，动态控制一切
