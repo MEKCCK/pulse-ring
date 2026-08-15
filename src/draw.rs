@@ -640,6 +640,37 @@ impl RingRenderer {
         self.queue.submit(Some(encoder.finish()));
     }
 
+    /// Fast path for video wallpaper: reuses the existing texture when the size is
+    /// unchanged (no mipmap generation, no re-creation) and just writes the frame.
+    pub fn update_wallpaper(&mut self, rgba: &[u8], w: u32, h: u32) {
+        let same_size = self
+            .wallpaper_texture
+            .as_ref()
+            .map(|t| t.width() == w && t.height() == h)
+            .unwrap_or(false);
+        if same_size {
+            let Some(tex) = &self.wallpaper_texture else { return };
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            return;
+        }
+        // Size changed (e.g. video resolution switch): fall back to a full re-upload.
+        self.upload_wallpaper(rgba, w, h);
+    }
+
     /// Wallpaper fit mode: 0 = cover (crop), 1 = contain (letterbox), 2 = stretch.
     pub fn set_wallpaper_mode(&mut self, mode: u32) {
         self.wallpaper_mode = mode;

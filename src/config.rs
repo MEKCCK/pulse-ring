@@ -326,6 +326,8 @@ pub struct Config {
     pub image_wallpaper: Option<String>,
     /// How the wallpaper image fits the screen.
     pub image_wallpaper_mode: WallpaperMode,
+    /// Optional video wallpaper path (takes precedence over imageWallpaper).
+    pub video_wallpaper: Option<String>,
     // ---- lua ----
     /// Optional Lua script path; the script can transform bands, tweak config and widgets
     /// at runtime via `onUpdate`, `transformBands`, etc.
@@ -401,6 +403,7 @@ impl Default for Config {
             particles: vec![],
             image_wallpaper: None,
             image_wallpaper_mode: WallpaperMode::Cover,
+            video_wallpaper: None,
             color_mode: ColorMode::Gradient,
             colors: vec![
                 [0.404, 0.314, 0.643, 1.0], // MD3 Primary #6750A4
@@ -946,6 +949,11 @@ fn apply(cfg: &mut Config, key: &str, v: &Val) {
         "imageWallpaper" => {
             if let Val::Str(s) = v {
                 cfg.image_wallpaper = Some(s.clone());
+            }
+        }
+        "videoWallpaper" => {
+            if let Val::Str(s) = v {
+                cfg.video_wallpaper = Some(s.clone());
             }
         }
         "imageWallpaperMode" => {

@@ -27,6 +27,7 @@ mod draw;
 mod lua;
 mod lyrics;
 mod plugin;
+mod video_wallpaper;
 use audio::NBANDS;
 use draw::RingRenderer;
 
@@ -215,6 +216,10 @@ struct App {
     wallpaper_image: Option<ImageData>,
     /// Set when the wallpaper changed and every renderer's texture needs an upload.
     wallpaper_dirty: bool,
+    /// Video wallpaper frame receiver (None when not using videoWallpaper).
+    video_rx: Option<std::sync::mpsc::Receiver<video_wallpaper::VideoFrame>>,
+    /// Only log the first wallpaper upload (video re-uploads every frame).
+    log_once_wallpaper: bool,
     texture_overflow_warned: bool,
     plugin_overflow_warned: bool,
     lua_state: lua::LuaState,
@@ -307,6 +312,22 @@ fn main() {
     // Image wallpaper: load once at startup (None = transparent / compositor wallpaper).
     let wallpaper_image = cfg.image_wallpaper.as_deref().and_then(load_image_raw);
     let wallpaper_dirty = cfg.image_wallpaper.is_some();
+    // Video wallpaper takes precedence over the static image.
+    let video_rx = match &cfg.video_wallpaper {
+        Some(vpath) if cfg.image_wallpaper.is_none() || vpath.is_empty() => {
+            log::info!("video wallpaper: starting {vpath}");
+            match video_wallpaper::start_video_wallpaper(vpath) {
+                Ok(rx) => Some(rx),
+                Err(e) => {
+                    log::warn!("video wallpaper failed ({e}); using image wallpaper if set");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    // If a video is running, it replaces the static image as the initial frame.
+    let wallpaper_dirty = wallpaper_dirty || video_rx.is_some();
     let mut app = App {
         compositor,
         layer_shell,
@@ -333,6 +354,8 @@ fn main() {
         cover_aspect: 1.0,
         wallpaper_image,
         wallpaper_dirty,
+        video_rx,
+        log_once_wallpaper: true,
         texture_overflow_warned: false,
         plugin_overflow_warned: false,
         lua_state,
@@ -1995,6 +2018,18 @@ impl App {
             _ => self.max_fps,
         };
         self.interval = std::time::Duration::from_millis(frame_interval_ms(fps));
+        // Video wallpaper: pull the newest decoded frame and mark the wallpaper dirty
+        // so every renderer re-uploads it (video frames need no mipmaps).
+        if let Some(rx) = &self.video_rx {
+            if let Some(frame) = video_wallpaper::drain_video(rx) {
+                self.wallpaper_image = Some(ImageData {
+                    w: frame.width,
+                    h: frame.height,
+                    rgba: frame.rgba,
+                });
+                self.wallpaper_dirty = true;
+            }
+        }
         let scene = self.compute_scene();
         // With an image wallpaper configured, every monitor shows it (wallpaper-engine
         // behaviour) — render all outputs regardless of the renderScreen visualisation cap.
@@ -2187,8 +2222,16 @@ impl App {
         // Image wallpaper: upload once per change to each renderer (behind everything).
         if self.wallpaper_dirty {
             if let Some(img) = &self.wallpaper_image {
-                renderer.upload_wallpaper(&img.rgba, img.w, img.h);
-                log::info!("wallpaper: uploaded {}x{} to output {}", img.w, img.h, idx);
+                if self.video_rx.is_some() {
+                    // Video: reuse the texture (same size), no mipmap generation per frame.
+                    renderer.update_wallpaper(&img.rgba, img.w, img.h);
+                } else {
+                    renderer.upload_wallpaper(&img.rgba, img.w, img.h);
+                }
+                if self.log_once_wallpaper {
+                    self.log_once_wallpaper = false;
+                    log::info!("wallpaper: uploaded {}x{} to output {}", img.w, img.h, idx);
+                }
             }
             renderer.set_wallpaper_mode(match self.cfg.image_wallpaper_mode {
                 crate::config::WallpaperMode::Contain => 1,
