@@ -505,7 +505,9 @@ impl LayerShellHandler for App {
             o.configured = true;
             // Only the configured render target gets an initial draw; other screens stay
             // blank (no buffer) so niri has nothing to composite for them.
-            let is_target = self.cfg.render_screen < 0 || self.cfg.render_screen == idx as i32;
+            let is_target = self.wallpaper_image.is_some()
+                || self.cfg.render_screen < 0
+                || self.cfg.render_screen == idx as i32;
             if first && is_target {
                 let _ = qh;
                 let scene = self.compute_scene();
@@ -1994,7 +1996,9 @@ impl App {
         };
         self.interval = std::time::Duration::from_millis(frame_interval_ms(fps));
         let scene = self.compute_scene();
-        let target = self.cfg.render_screen;
+        // With an image wallpaper configured, every monitor shows it (wallpaper-engine
+        // behaviour) — render all outputs regardless of the renderScreen visualisation cap.
+        let target = if self.wallpaper_image.is_some() { -1 } else { self.cfg.render_screen };
         if target >= 0 {
             let idx = target as usize;
             if idx < self.outputs.len() && !self.outputs[idx].closed && self.outputs[idx].width > 0 {
