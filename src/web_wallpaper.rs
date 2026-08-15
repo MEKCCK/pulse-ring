@@ -69,22 +69,22 @@ impl Drop for WebWallpaperPlayer {
     }
 }
 
-/// Locate the Electron helper: prefer a system `electron`, else `node` with the
-/// electron npm package resolved from the repo's electron-wallpaper dir.
-fn electron_binary() -> Option<std::path::PathBuf> {
-    for c in ["electron"] {
-        if let Ok(out) = std::process::Command::new(c).arg("--version").output() {
-            if out.status.success() {
-                return Some(std::path::PathBuf::from(c));
-            }
-        }
-    }
-    None
+/// Use the Electron version pinned by this project. A system-wide Electron can
+/// have a different Chromium/Node ABI and must never affect wallpaper behavior.
+fn electron_binary() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("electron-wallpaper/node_modules/.bin/electron")
 }
 
 /// Start rendering `html_path` at `width`x`height` via Electron offscreen.
 pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<WebWallpaperPlayer, String> {
-    let electron = electron_binary().ok_or("electron not found (install the 'electron' package)".to_string())?;
+    let electron = electron_binary();
+    if !electron.is_file() {
+        return Err(format!(
+            "project Electron not found at {} (run npm install in electron-wallpaper)",
+            electron.display()
+        ));
+    }
     let helper = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/electron-wallpaper/main.js"

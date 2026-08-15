@@ -3,3 +3,7 @@
 plugins/*/target/
 *.so
 .superpowers/
+
+# Node / Electron dependencies and logs
+node_modules/
+npm-debug.log*

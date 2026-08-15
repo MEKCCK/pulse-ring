@@ -2206,6 +2206,15 @@ impl App {
         self.profile_mark("pull_audio", t0);
         // Adaptive frame rate: idle (quiet for 2s) drops to 5fps; audio resumes instantly.
         let energy_max = self.bands.iter().copied().fold(0.0f32, f32::max);
+        // Web and scene wallpapers use the same live spectrum as the native
+        // visualiser. Push it before collecting their next rendered frame so a
+        // page can drive CSS/canvas/WebGL animation from the current sound.
+        if let Some(player) = &mut self.scene_player {
+            player.send_audio(&self.bands, energy_max);
+        }
+        if let Some(player) = &mut self.web_player {
+            player.send_audio(&self.bands, energy_max);
+        }
         let idle = energy_max < 0.002;
         let now = self.start.elapsed().as_secs_f32();
         self.idle_since = if idle {
@@ -2835,4 +2844,3 @@ PulseRing {
     }
 
 }
-

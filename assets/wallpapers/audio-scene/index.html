@@ -10,7 +10,7 @@
 <body>
 <canvas id="c"></canvas>
 <script>
-// 场景壁纸（轻量版）：保证 30fps 流畅不卡死
+// pulse-ring 示例场景：低频驱动脉冲环，中频驱动粒子，高频驱动星芒。
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 let W, H;
@@ -21,64 +21,99 @@ function resize() {
 resize();
 addEventListener('resize', resize);
 
-const cfg = { particles: 36, baseHue: 262 };
-let energy = 0, bass = 0, mid = 0, treble = 0, bands = null;
+const cfg = { particles: 96, baseHue: 262, spectrum: true, trails: 0.2 };
+let energy = 0, bass = 0, mid = 0, treble = 0;
+let targetEnergy = 0, targetBass = 0, targetMid = 0, targetTreble = 0;
+let bands = new Float32Array(128);
 if (window.pulseRing) {
-  window.pulseRing.onConfig((c) => Object.assign(cfg, c));
-  window.pulseRing.onBands((d) => { bands = d.bands; energy = d.energy; bass = d.bass; mid = d.mid; treble = d.treble; });
-}
-
-// 粒子：轻量环绕
-const P = [];
-for (let i = 0; i < cfg.particles; i++) {
-  P.push({
-    a: Math.random() * Math.PI * 2,
-    r: 0.06 + Math.random() * 0.4,
-    w: (0.06 + Math.random() * 0.12) * (Math.random() < 0.5 ? 1 : -1),
-    b: Math.random() * Math.PI * 2,
-    s: (1.5 + Math.random() * 2) ,
-    hue: (cfg.baseHue + Math.random() * 60) % 360,
+  window.pulseRing.onConfig((c) => { Object.assign(cfg, c); syncParticles(); });
+  window.pulseRing.onAudio((d) => {
+    bands = d.bands;
+    targetEnergy = d.energy;
+    targetBass = d.bass;
+    targetMid = d.mid;
+    targetTreble = d.treble;
   });
 }
+
+const P = [];
+function makeParticle() {
+  return {
+    a: Math.random() * Math.PI * 2,
+    r: 0.08 + Math.random() * 0.37,
+    w: (0.002 + Math.random() * 0.006) * (Math.random() < 0.5 ? 1 : -1),
+    b: Math.random() * Math.PI * 2,
+    s: 0.8 + Math.random() * 2.4,
+    hue: (cfg.baseHue + Math.random() * 60) % 360,
+    band: Math.floor(Math.random() * 128),
+  };
+}
+function syncParticles() {
+  const wanted = Math.max(12, Math.min(300, Number(cfg.particles) || 96));
+  while (P.length < wanted) P.push(makeParticle());
+  if (P.length > wanted) P.length = wanted;
+}
+syncParticles();
 
 let t = 0;
 function frame() {
   t += 0.016;
-  ctx.fillStyle = 'rgba(6, 5, 18, 0.32)'; // 拖影（可见运动）
+  energy += (targetEnergy - energy) * 0.16;
+  bass += (targetBass - bass) * 0.22;
+  mid += (targetMid - mid) * 0.14;
+  treble += (targetTreble - treble) * 0.3;
+
+  const fade = Math.max(0.06, Math.min(0.5, Number(cfg.trails) || 0.2));
+  ctx.fillStyle = `rgba(6, 5, 18, ${fade})`;
   ctx.fillRect(0, 0, W, H);
 
-  // 中心光晕（呼吸 + 能量）
-  const breathe = 0.7 + 0.3 * Math.sin(t * 2.0);
-  const r = (140 + 60 * breathe + energy * 260);
+  const breathe = 0.72 + 0.28 * Math.sin(t * 1.7);
+  const r = Math.min(W, H) * (0.16 + 0.08 * breathe + energy * 0.2);
   const g = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-  g.addColorStop(0, `hsla(${cfg.baseHue}, 80%, ${55 + energy * 20}%, ${0.18 * breathe + energy * 0.3})`);
+  g.addColorStop(0, `hsla(${cfg.baseHue + mid * 40}, 90%, ${55 + energy * 20}%, ${0.2 + energy * 0.35})`);
+  g.addColorStop(0.45, `hsla(${cfg.baseHue + 35}, 85%, 38%, ${0.1 + bass * 0.18})`);
   g.addColorStop(1, 'transparent');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
 
-  // 粒子：环绕 + 低音甩出
+  // 低频脉冲环
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  for (let ring = 0; ring < 3; ring++) {
+    const radius = Math.min(W, H) * (0.09 + ring * 0.055 + bass * 0.035);
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = `hsla(${cfg.baseHue + ring * 24}, 95%, 68%, ${0.08 + bass * (0.35 - ring * 0.06)})`;
+    ctx.lineWidth = 1 + bass * (6 - ring);
+    ctx.stroke();
+  }
+  ctx.restore();
+
   for (const p of P) {
-    p.a += p.w + energy * 0.03;
-    p.b += 0.02 + energy * 0.05;
-    let rr = p.r + Math.sin(p.b) * 0.08;
-    if (bass > 0.1 && Math.random() < bass * 0.2) rr += bass * 0.2;
+    const band = bands[p.band] || 0;
+    p.a += p.w * (1 + mid * 4);
+    p.b += 0.012 + band * 0.04;
+    const rr = p.r + Math.sin(p.b) * 0.025 + band * 0.1 + bass * 0.025;
     const x = W/2 + Math.cos(p.a) * rr * W;
     const y = H/2 + Math.sin(p.a) * rr * H;
     ctx.beginPath();
-    ctx.arc(x, y, p.s * (1 + energy), 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${p.hue}, 85%, ${62 + energy * 22}%, ${0.55 + energy * 0.4})`;
+    ctx.arc(x, y, p.s * (1 + band * 2 + treble), 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${p.hue + treble * 35}, 90%, ${62 + band * 24}%, ${0.25 + band * 0.7})`;
     ctx.fill();
   }
 
-  // 底部频谱条（轻量）
-  if (bands) {
-    const bw = W / 40;
-    const bh = H * 0.08;
-    for (let i = 0; i < 40; i++) {
-      const v = bands[Math.floor(i * 3.2)] * bh;
+  if (cfg.spectrum !== false) {
+    const count = 64;
+    const bw = W / count;
+    const bh = H * 0.14;
+    for (let i = 0; i < count; i++) {
+      const v = (bands[i * 2] || 0) * bh;
       if (v < 0.5) continue;
-      ctx.fillStyle = `hsla(${cfg.baseHue + i * 5}, 80%, 58%, 0.4)`;
-      ctx.fillRect(i * bw, H - v, bw * 0.7, v);
+      const gradient = ctx.createLinearGradient(0, H - v, 0, H);
+      gradient.addColorStop(0, `hsla(${cfg.baseHue + i * 2.4}, 95%, 72%, 0.75)`);
+      gradient.addColorStop(1, `hsla(${cfg.baseHue + i * 2.4}, 85%, 42%, 0.08)`);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(i * bw + bw * 0.14, H - v, bw * 0.72, v);
     }
   }
   requestAnimationFrame(frame);

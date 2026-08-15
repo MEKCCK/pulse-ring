@@ -111,6 +111,7 @@ my-wallpaper/
 - `wallpapers: ["~/wallpapers/my-wallpaper"]` 直接传文件夹路径，自动读清单按类型加载
 - `type`: `web`/`scene`（HTML）、`video`（视频）、`image`（图片）
 - `params` 通过 `window.pulseRing.onConfig()` 传给页面
+- 网页/场景壁纸可通过 `window.pulseRing.onAudio(callback)` 获取 128 段频谱以及 `energy`/`bass`/`mid`/`treble`；该方法返回取消订阅函数。`onBands` 作为兼容别名保留，`getAudioData()` 可读取最新一帧。
 
 **歌词来源**（按优先级）：
 1. 本地文件 `~/.config/pulse-ring/lyrics/<标题>.lrc` 或 `<歌手> - <标题>.lrc`
