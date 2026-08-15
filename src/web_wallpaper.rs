@@ -28,11 +28,13 @@ pub struct WebWallpaperPlayer {
 }
 
 impl WebWallpaperPlayer {
-    /// Send one audio frame: 128 f32 bands + 1 f32 energy (516 bytes, LE).
+    /// Send one audio frame: tag 0x00 + 128 f32 bands + 1 f32 energy (1+516 bytes, LE).
+    /// The tag keeps the stream in sync with the Electron helper's parser.
     pub fn send_audio(&mut self, bands: &[f32; 128], energy: f32) {
         let Some(stdin) = self.stdin.as_mut() else { return };
         use std::io::Write;
-        let mut buf = Vec::with_capacity(516);
+        let mut buf = Vec::with_capacity(517);
+        buf.push(0u8); // tag: audio frame
         for b in bands.iter().take(128) {
             buf.extend_from_slice(&b.to_le_bytes());
         }
@@ -117,6 +119,7 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
             let mut reader = stdout;
             let mut buf = Vec::new();
             let mut pending: Option<(u32, u32)> = None;
+            let mut frames: u64 = 0;
             loop {
                 if stop_thread.load(Ordering::SeqCst) {
                     break;
@@ -134,6 +137,10 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
                     }
                     let w = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
                     let h = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+                    if w == 0 || h == 0 || w > 8192 || h > 8192 {
+                        log::error!("web reader: BAD header {w}x{h} — stream desync");
+                        return;
+                    }
                     pending = Some((w, h));
                 }
                 let (w, h) = pending.unwrap();
@@ -149,6 +156,10 @@ pub fn start_web_wallpaper(html_path: &str, width: u32, height: u32) -> Result<W
                     }
                 }
                 pending = None;
+                frames += 1;
+                if frames % 30 == 0 || frames <= 3 {
+                    log::info!("web reader: frame #{frames} {w}x{h} ok");
+                }
                 if tx.send(WebFrame { rgba: buf.clone(), width: w, height: h }).is_err() {
                     return;
                 }

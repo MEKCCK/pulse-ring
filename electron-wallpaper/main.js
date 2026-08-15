@@ -56,6 +56,7 @@ const pending = { tag: null, buf: Buffer.alloc(0), need: 1 };
 let win = null;
 
 function handleFrame(buf) {
+  try {
   if (pending.tag === 0) {
     if (buf.length < 516) return;
     const bands = new Float32Array(128);
@@ -74,12 +75,14 @@ function handleFrame(buf) {
   } else if (pending.tag === 1) {
     if (buf.length < 4) return;
     const len = buf.readUInt32LE(0);
+    if (len < 0 || len > 4096) return;
     if (buf.length < 4 + len) return;
     const cfg = JSON.parse(buf.slice(4, 4 + len).toString('utf8'));
     if (win && !win.isDestroyed()) {
       win.webContents.send('pulse-config', cfg);
     }
   }
+  } catch (e) { /* 丢弃损坏帧，绝不崩溃 */ }
 }
 
 process.stdin.on('data', (chunk) => {
@@ -118,21 +121,28 @@ app.whenReady().then(() => {
   win.webContents.setFrameRate(30);
   win.loadFile(htmlPath);
 
-  win.webContents.on('paint', (_event, _dirty, image) => {
-    if (paused) return;
-    const size = image.getSize();
-    if (size.width !== width || size.height !== height) return;
-    const bgra = image.toBitmap(); // BGRA（Electron 位图）
-    // BGRA -> RGBA
-    const rgba = Buffer.allocUnsafe(bgra.length);
-    for (let i = 0; i < bgra.length; i += 4) {
-      rgba[i] = bgra[i + 2];
-      rgba[i + 1] = bgra[i + 1];
-      rgba[i + 2] = bgra[i];
-      rgba[i + 3] = bgra[i + 3];
-    }
-    writeFrame(rgba);
-  });
+  // 隐藏窗口的离屏 paint 事件只触发前 1-2 帧就停止（Electron 已知行为），
+  // 改用 capturePage 定时抓帧：无论页面是否“触发重绘”都强制取帧，稳定 30fps。
+  const captureTimer = () => {
+    if (paused || !win || win.isDestroyed()) return;
+    win.webContents.capturePage()
+      .then((image) => {
+        const size = image.getSize();
+        if (size.width !== width || size.height !== height) return;
+        const bgra = image.toBitmap(); // BGRA（Electron 位图）
+        const rgba = Buffer.allocUnsafe(bgra.length);
+        for (let i = 0; i < bgra.length; i += 4) {
+          rgba[i] = bgra[i + 2];
+          rgba[i + 1] = bgra[i + 1];
+          rgba[i + 2] = bgra[i];
+          rgba[i + 3] = bgra[i + 3];
+        }
+        writeFrame(rgba);
+      })
+      .catch(() => {})
+      .finally(() => setTimeout(captureTimer, 33)); // ~30fps
+  };
+  setTimeout(captureTimer, 300); // 等页面加载后开始
 
   win.webContents.on('did-fail-load', (_e, code, desc) => {
     console.error(`web wallpaper load failed (${code}): ${desc}`);

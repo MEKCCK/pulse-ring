@@ -331,7 +331,10 @@ fn main() {
     let music_rx = spawn_music_thread();
     let wallpaper_list = cfg.wallpapers.clone();
     // Image wallpaper: load once at startup (None = transparent / compositor wallpaper).
-    let wallpaper_image = if !wallpaper_list.is_empty() {
+    // 配置了场景壁纸时，初始不预加载轮换图（场景首帧到达前保持透明，避免闪一下静态图）。
+    let wallpaper_image = if cfg.scene_wallpaper.is_some() {
+        None
+    } else if !wallpaper_list.is_empty() {
         cfg.wallpapers.first().and_then(|p| load_image_raw(p))
     } else {
         cfg.image_wallpaper.as_deref().and_then(load_image_raw)
