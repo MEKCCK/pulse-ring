@@ -337,6 +337,8 @@ pub struct Config {
     pub scene_wallpaper: Option<String>,
     /// Render size for the web wallpaper (screen-sized by default).
     pub web_wallpaper_size: (u32, u32),
+    /// File modification time of the loaded config (for hot-reload checks).
+    pub modified: Option<std::time::SystemTime>,
     /// Wayland layer for the wallpaper surface.
     /// "background" = layer-shell Background (transparent windows see it);
     /// "bottom" = below normal windows/panels (KDE screencast safe).
@@ -389,6 +391,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            modified: None,
             shape: Shape::Ring,
             corners: 5.0,
             spikiness: 0.35,
@@ -466,6 +469,13 @@ impl Config {
     pub fn load(path: &Path) -> Self {
         // First run: write the bundled default configs so the user can edit them.
         ensure_defaults();
+        let modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        let mut cfg = Self::load_with(path);
+        cfg.modified = modified;
+        cfg
+    }
+
+    fn load_with(path: &Path) -> Self {
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {

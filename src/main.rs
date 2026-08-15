@@ -243,6 +243,7 @@ struct App {
     texture_overflow_warned: bool,
     plugin_overflow_warned: bool,
     lua_state: lua::LuaState,
+    last_cfg_check: std::time::Instant,
     plugins: Vec<plugin::LoadedPlugin>,
     plugin_smooth_bands: [f32; 128],
     music: lua::MusicInfo,
@@ -465,6 +466,7 @@ fn main() {
         texture_overflow_warned: false,
         plugin_overflow_warned: false,
         lua_state,
+        last_cfg_check: std::time::Instant::now(),
         plugins: plugin::load_plugins_with_log(),
         plugin_smooth_bands: [0.0; 128],
         music: lua::MusicInfo::default(),
@@ -2214,8 +2216,47 @@ impl App {
     }
 
     /// Timed tick: render only the configured screen (or all if render_screen < 0).
+    /// Hot-reload: when the config file changes, re-apply visual settings,
+    /// wallpaper image and Lua script without restarting the process.
+    fn check_config_reload(&mut self) {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_cfg_check).as_secs() < 1 {
+            return;
+        }
+        self.last_cfg_check = now;
+        let path = crate::config::config_path();
+        let modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        if modified == self.cfg.modified || modified.is_none() {
+            return;
+        }
+        log::info!("config changed — hot reload");
+        let new_cfg = crate::config::Config::load(&path);
+        // 壁纸变化：重载图片
+        let img_changed = new_cfg.image_wallpaper != self.cfg.image_wallpaper;
+        let lua_changed = new_cfg.lua_script != self.cfg.lua_script;
+        self.cfg = new_cfg;
+        if img_changed {
+            if let Some(img) = self
+                .cfg
+                .image_wallpaper
+                .as_deref()
+                .map(crate::resolve_wallpaper)
+                .and_then(|rwp| crate::load_image_raw(&rwp.file))
+            {
+                self.wallpaper_image = Some(img);
+                self.wallpaper_dirty = true;
+            }
+        }
+        if lua_changed {
+            let script = self.cfg.lua_script.clone();
+            self.lua_state = crate::lua::LuaState::new(script.as_deref(), &mut self.cfg);
+            log::info!("lua script reloaded");
+        }
+    }
+
     fn tick(&mut self) {
         let t0 = std::time::Instant::now();
+        self.check_config_reload();
         self.pull_audio();
         self.profile_mark("pull_audio", t0);
         // Adaptive frame rate: idle (quiet for 2s) drops to 5fps; audio resumes instantly.
