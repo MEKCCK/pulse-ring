@@ -74,6 +74,7 @@ pub struct PluginCtx {
     pub get_time_hms: Option<extern "C" fn(user: *mut c_void, out: *mut [i32; 3])>,
 }
 
+#[allow(dead_code)]
 pub struct LoadedPlugin {
     _lib: Library,
     name: String,
@@ -165,11 +166,12 @@ fn load_plugin(path: &PathBuf) -> anyhow::Result<LoadedPlugin> {
     // call on_load
     if let Some(f) = loaded.plugin.on_load {
         // SAFETY: plugin promises a valid ctx.
-        unsafe { f(&mut loaded.ctx) };
+        { f(&mut loaded.ctx) };
     }
     Ok(loaded)
 }
 
+#[allow(dead_code)]
 impl LoadedPlugin {
     pub(crate) fn ctx_ptr(&self) -> *mut PluginCtx {
         &self.ctx as *const PluginCtx as *mut PluginCtx
@@ -189,14 +191,14 @@ impl LoadedPlugin {
     pub fn call_update(&self, dt: f32) {
         if let Some(f) = self.plugin.on_update {
             // SAFETY: plugin promises valid ctx.
-            unsafe { f(self.ctx_ptr(), dt) };
+            { f(self.ctx_ptr(), dt) };
         }
     }
 
     pub fn call_render(&self, req: &mut RenderRequest) {
         if let Some(f) = self.plugin.render_texture {
             // SAFETY: host provides a valid RenderRequest with a valid buffer.
-            unsafe { f(self.ctx_ptr(), req) };
+            { f(self.ctx_ptr(), req) };
         }
     }
 
@@ -204,7 +206,7 @@ impl LoadedPlugin {
         let mut out = *input;
         if let Some(f) = self.plugin.transform_bands {
             // SAFETY: both slices are 128 f32.
-            unsafe { f(self.ctx_ptr(), input.as_ptr(), out.as_mut_ptr()) };
+            { f(self.ctx_ptr(), input.as_ptr(), out.as_mut_ptr()) };
         }
         out
     }
@@ -212,7 +214,7 @@ impl LoadedPlugin {
     pub fn unload(&mut self) {
         if let Some(f) = self.plugin.on_unload {
             // SAFETY: plugin promises valid ctx.
-            unsafe { f(self.ctx_ptr()) };
+            { f(self.ctx_ptr()) };
         }
     }
 
@@ -228,6 +230,7 @@ thread_local! {
 }
 
 /// Host callbacks so plugins can poke at the live Config / bands.
+#[allow(dead_code)]
 pub struct HostBridge<'a> {
     pub cfg: &'a mut crate::config::Config,
     pub bands: &'a [f32; 128],
@@ -239,8 +242,8 @@ impl<'a> HostBridge<'a> {
     pub fn make_ctx(&mut self) -> PluginCtx {
         // We need raw pointers into cfg/bands; safe because the host only calls
         // plugins synchronously on the main thread.
-        let cfg_ptr = self.cfg as *mut crate::config::Config as *mut c_void;
-        let bands_ptr = self.bands.as_ptr() as *const f32 as *mut c_void;
+        let _cfg_ptr = self.cfg as *mut crate::config::Config as *mut c_void;
+        let _bands_ptr = self.bands.as_ptr() as *const f32 as *mut c_void;
         PluginCtx {
             user: std::ptr::null_mut(),
             get_config_f32: Some(host_get_config),

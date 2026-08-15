@@ -1,11 +1,10 @@
-use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    compositor::{CompositorHandler, CompositorState},
     delegate_registry,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
@@ -163,6 +162,7 @@ impl ProfileStats {
 }
 
 /// Per-frame scene state computed ONCE per tick and consumed by every output.
+#[allow(dead_code)]
 struct SceneFrame {
     render_bands: [f32; NBANDS],
     spawn_scale: f32,
@@ -180,6 +180,7 @@ struct SceneFrame {
 }
 
 /// One full rendering instance per output (layer surface + wgpu surface + renderer).
+#[allow(dead_code)]
 struct OutputSurfaces {
     output: wl_output::WlOutput,
     layer: LayerSurface,
@@ -192,6 +193,7 @@ struct OutputSurfaces {
     uploaded_texture_revisions: [u64; draw::ATLAS_CAPACITY],
 }
 
+#[allow(dead_code)]
 struct App {
     compositor: CompositorState,
     layer_shell: LayerShell,
@@ -735,7 +737,7 @@ fn compute_particles(
             continue;
         }
         let a0 = p.angle.to_radians();
-        let (mut px, mut py, mut vx, mut vy, mut alpha, size0) = match cfg.particle_mode {
+        let (px, py, vx, vy, alpha, size0) = match cfg.particle_mode {
             ParticleMode::Burst => {
                 let period = p.life.max(0.1);
                 let phase = if cfg.particle_loop { t % period } else { t.min(period) };
@@ -1805,9 +1807,9 @@ impl App {
                     let sec = t.2 as f32 + t.3 as f32;
                     let min = t.1 as f32 + sec / 60.0;
                     let hour = (t.0 as f32 % 12.0) + min / 60.0;
-                    data[o + 19] = (hour / 12.0 * 6.28318530718 - 1.5707963268);
-                    data[o + 20] = (min / 60.0 * 6.28318530718 - 1.5707963268);
-                    data[o + 21] = (sec / 60.0 * 6.28318530718 - 1.5707963268);
+                    data[o + 19] = hour / 12.0 * 6.28318530718 - 1.5707963268 ;
+                    data[o + 20] = min / 60.0 * 6.28318530718 - 1.5707963268 ;
+                    data[o + 21] = sec / 60.0 * 6.28318530718 - 1.5707963268 ;
                 }
                 WidgetType::Cover => {
                     data[o + 6] = COVER_TEXTURE_SLOT as f32;

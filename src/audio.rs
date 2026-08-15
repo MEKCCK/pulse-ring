@@ -3,7 +3,7 @@ use cpal::{BufferSize, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Preferred sample rate / channel count for the capture stream. PipeWire's "pipewire" ALSA device
 /// advertises absurd ranges (1 Hz..384000 Hz, 1..32 ch); we pin sane values so the FFT band mapping
@@ -48,11 +48,9 @@ fn try_start_audio(sensitivity: f32, decay: f32) -> anyhow::Result<Receiver<[f32
                     current_sink = sink;
                     // Drop the old stream (stops capture; its FFT thread exits when the
                     // old frame channel closes), then build a fresh one on the new node.
-                    stream = None;
+                    drop(stream.take()); // drop old stream (stops capture; FFT thread exits)
                     log::info!("audio: (re)starting capture on {current_sink:?}");
                     stream = restart_capture(sensitivity, decay, &mags_tx);
-                    // Keep the live stream bound so it is dropped on the next switch.
-                    let _ = &stream;
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }

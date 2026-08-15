@@ -1,4 +1,3 @@
-use std::num::NonZeroU32;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::wgt::CompositeAlphaMode;
@@ -33,6 +32,7 @@ pub(crate) fn atlas_content_uv(index: usize, w: u32, h: u32) -> Option<(f32, f32
 /// GPU renderer for the pulsing ring. Owns the wgpu surface/pipeline and a uniform buffer
 /// holding the latest 128 band magnitudes. CPU work per frame: a small buffer write + one draw.
 /// All ring geometry / shading is computed in the fragment shader.
+#[allow(dead_code)]
 pub struct RingRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -172,6 +172,7 @@ struct Uniforms {
     wallpaper_progress: f32,
 }
 
+#[allow(dead_code)]
 impl RingRenderer {
     pub fn new(
         device: wgpu::Device,
@@ -702,7 +703,7 @@ impl RingRenderer {
                     },
                 ],
             });
-            let _ = (0u32);
+            let _ = 0u32 ;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mipmap pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1090,7 +1091,7 @@ impl RingRenderer {
         // Timeout/Occluded: transient in Mailbox mode when the previous frame is still being
         // composited — retry briefly instead of skipping the frame, which causes visible
         // stutter on secondary monitors.
-        let mut frame = loop {
+        let frame = loop {
             match self.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(f) => break f,
                 wgpu::CurrentSurfaceTexture::Suboptimal(f) => break f,
@@ -1334,11 +1335,6 @@ impl RingRenderer {
     }
 }
 
-/// Smoothstep helper (CPU side): 0 below edge0, 1 above edge1, smooth between.
-fn smoothstep01(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
 
 /// Full-screen triangle vertex shader + SDF ring fragment shader. CPU uploads band magnitudes
 /// (NBANDS floats) each frame; the shader does all per-pixel math on the GPU.

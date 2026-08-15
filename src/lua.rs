@@ -16,6 +16,7 @@ use mlua::{Lua, Table};
 
 use crate::config::{Config, Shape, ColorMode, ParticleMode};
 
+#[allow(dead_code)]
 pub struct LuaState {
     lua: Option<Lua>,
     script_path: String,
@@ -25,6 +26,7 @@ pub struct LuaState {
 // LuaState is used single-threaded on the main thread.
 unsafe impl Send for LuaState {}
 
+#[allow(dead_code)]
 impl LuaState {
     pub fn new(script: Option<&str>, cfg: &mut Config) -> Self {
         let cfg_ptr: *mut Config = cfg;

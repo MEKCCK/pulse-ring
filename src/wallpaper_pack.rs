@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 /// Manifest of a packaged wallpaper (`project.json`).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 pub struct WallpaperSpec {
     /// "web" | "video" | "image" (defaults: web).
     #[serde(rename = "type", default)]
@@ -105,11 +106,3 @@ pub fn resolve_pack(path: &str) -> Option<ResolvedWallpaper> {
     })
 }
 
-/// Resolution from the spec "WxH" string (or None).
-pub fn spec_resolution(res: &Option<String>) -> Option<(u32, u32)> {
-    let r = res.as_deref()?;
-    let (w, h) = r.split_once('x')?;
-    let w: u32 = w.trim().parse().ok()?;
-    let h: u32 = h.trim().parse().ok()?;
-    Some((w.max(1), h.max(1)))
-}

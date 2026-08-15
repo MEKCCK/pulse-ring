@@ -17,6 +17,7 @@ pub struct LyricLine {
 
 /// Parsed lyric document.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct LyricData {
     /// Lines sorted by start time.
     pub lines: Vec<LyricLine>,
@@ -26,6 +27,7 @@ pub struct LyricData {
 
 /// Current playback state resolved against a `LyricData`.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
 pub struct LineState {
     /// Index into `LyricData::lines`.
     pub index: usize,
