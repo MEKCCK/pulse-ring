@@ -1,23 +1,24 @@
 // pulse-ring 网页壁纸渲染器（Electron 离屏）
 //
 // 用法：electron main.js <html路径> <宽度> <高度>
-// 将离屏渲染的 HTML 页面按帧通过 stdout 输出：
+// 通过 capturePage 定时抓帧，把页面帧按 stdout 输出：
 //   [4 字节 LE 宽][4 字节 LE 高][宽*高*4 字节 RGBA]
-// 由 pulse-ring 读取并作为壁纸纹理上传（与视频壁纸同路径）。
+// 从 stdin 读取配置（tag 0x01 + 4 字节长度 + JSON）。
+// 音频 API 已移除（避免子进程 stdin 阻塞导致主循环死锁）。
 
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
-const fs = require('fs');
 
 const htmlPath = process.argv[2];
 const width = parseInt(process.argv[3] || '1920', 10);
 const height = parseInt(process.argv[4] || '1080', 10);
 
+let win = null;
+
 let queue = [];
 let writing = false;
 let paused = false;
 
-// 向 stdout 写入一帧（RGBA），带背压：管道满时暂停渲染。
 function writeFrame(buf) {
   const header = Buffer.alloc(8);
   header.writeUInt32LE(width, 0);
@@ -45,65 +46,28 @@ function pump() {
   }
 }
 
-app.commandLine.appendSwitch('ozone-platform', 'x11');
-// 必须软件渲染：本机 MESA DRI 权限问题会让 GPU 进程段错误崩溃（exit 139），
-// 硬件加速反而导致离屏 paint 停发、壁纸卡死。
-app.disableHardwareAcceleration();
-// ---- 从 stdin 读取 pulse-ring 推送的数据（帧协议）----
-//   tag 0x00：音频帧，516 字节（128 f32 频段 + 1 f32 能量）
-//   tag 0x01：配置帧，4 字节长度 + JSON
-const pending = { tag: null, buf: Buffer.alloc(0), need: 1 };
-let win = null;
-
-function handleFrame(buf) {
-  try {
-  if (pending.tag === 0) {
-    if (buf.length < 516) return;
-    const bands = new Float32Array(128);
-    for (let i = 0; i < 128; i++) bands[i] = buf.readFloatLE(i * 4);
-    const energy = buf.readFloatLE(512);
-    let bass = 0, mid = 0, treble = 0;
-    for (let i = 0; i < 32; i++) bass += bands[i];
-    for (let i = 32; i < 96; i++) mid += bands[i];
-    for (let i = 96; i < 128; i++) treble += bands[i];
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('pulse-bands', {
-        bands: Array.from(bands), energy,
-        bass: bass / 32, mid: mid / 64, treble: treble / 32,
-      });
-    }
-  } else if (pending.tag === 1) {
-    if (buf.length < 4) return;
-    const len = buf.readUInt32LE(0);
-    if (len < 0 || len > 4096) return;
-    if (buf.length < 4 + len) return;
-    const cfg = JSON.parse(buf.slice(4, 4 + len).toString('utf8'));
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('pulse-config', cfg);
-    }
-  }
-  } catch (e) { /* 丢弃损坏帧，绝不崩溃 */ }
-}
-
+// ---- 从 stdin 读取 pulse-ring 推送的配置（tag 0x01 + 4 字节长度 + JSON）----
+const pendingCfg = { buf: Buffer.alloc(0), need: 5 };
 process.stdin.on('data', (chunk) => {
-  let i = 0;
-  while (i < chunk.length) {
-    if (pending.need === 1) {
-      pending.tag = chunk[i++];
-      pending.need = pending.tag === 0 ? 516 : 4;
-      pending.buf = Buffer.alloc(0);
-    } else {
-      const take = Math.min(pending.need, chunk.length - i);
-      pending.buf = Buffer.concat([pending.buf, chunk.slice(i, i + take)]);
-      i += take;
-      pending.need -= take;
-      if (pending.need === 0) {
-        handleFrame(pending.buf);
-        pending.need = 1;
-      }
+  pendingCfg.buf = Buffer.concat([pendingCfg.buf, chunk]);
+  while (pendingCfg.buf.length >= 5) {
+    const tag = pendingCfg.buf[0];
+    const len = pendingCfg.buf.readUInt32LE(1);
+    if (tag !== 1 || len <= 0 || len > 4096 || pendingCfg.buf.length < 5 + len) {
+      pendingCfg.buf = Buffer.alloc(0);
+      break;
     }
+    try {
+      const cfg = JSON.parse(pendingCfg.buf.slice(5, 5 + len).toString('utf8'));
+      if (win && !win.isDestroyed()) win.webContents.send('pulse-config', cfg);
+    } catch (_) {}
+    pendingCfg.buf = pendingCfg.buf.slice(5 + len);
   }
 });
+
+app.commandLine.appendSwitch('ozone-platform', 'x11');
+// 必须软件渲染：本机 MESA DRI 权限问题会让 GPU 进程段错误崩溃（exit 139）。
+app.disableHardwareAcceleration();
 
 app.whenReady().then(() => {
   win = new BrowserWindow({
@@ -122,7 +86,7 @@ app.whenReady().then(() => {
   win.loadFile(htmlPath);
 
   // 隐藏窗口的离屏 paint 事件只触发前 1-2 帧就停止（Electron 已知行为），
-  // 改用 capturePage 定时抓帧：无论页面是否“触发重绘”都强制取帧，稳定 30fps。
+  // 改用 capturePage 定时抓帧：稳定 ~30fps。
   const captureTimer = () => {
     if (paused || !win || win.isDestroyed()) return;
     win.webContents.capturePage()

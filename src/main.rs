@@ -2133,7 +2133,6 @@ impl App {
             }
         }
         if let Some(player) = &mut self.scene_player {
-            player.send_audio(&self.bands, self.ring_amp_smooth);
             if let Some(frame) = web_wallpaper::drain_web(&player.rx) {
                 self.wallpaper_image = Some(ImageData {
                     w: frame.width,
@@ -2148,9 +2147,6 @@ impl App {
             }
         }
         if let Some(player) = &mut self.web_player {
-            // 音频 API：把本帧频段 + 整体能量推给网页壁纸（JS 可读）
-            let energy: f32 = self.ring_amp_smooth;
-            player.send_audio(&self.bands, energy);
             if let Some(frame) = web_wallpaper::drain_web(&player.rx) {
                 self.wallpaper_image = Some(ImageData {
                     w: frame.width,
