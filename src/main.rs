@@ -358,9 +358,13 @@ fn main() {
         None
     } else if !wallpaper_list.is_empty() {
         let rwp = resolve_wallpaper(&cfg.wallpapers[0]);
+        apply_pack_style(&mut cfg, rwp.qml.as_deref(), rwp.lua.as_deref());
         (rwp.kind != "web" && rwp.kind != "video").then(|| rwp.file).and_then(|f| load_image_raw(&f))
     } else {
-        cfg.image_wallpaper.as_deref().map(resolve_wallpaper).and_then(|rwp| load_image_raw(&rwp.file))
+        cfg.image_wallpaper.as_deref().map(resolve_wallpaper).and_then(|rwp| {
+            apply_pack_style(&mut cfg, rwp.qml.as_deref(), rwp.lua.as_deref());
+            load_image_raw(&rwp.file)
+        })
     };
     let wallpaper_dirty = wallpaper_image.is_some();
     // A standalone videoWallpaper (no rotation list) starts the video immediately.
@@ -1550,8 +1554,8 @@ struct ResolvedWp {
 }
 
 /// 应用壁纸包内的 QML 样式与 Lua 行为（保留壁纸相关配置字段）。
-fn apply_pack_style(cfg: &mut config::Config, rwp: &ResolvedWp) {
-    if let Some(q) = &rwp.qml {
+fn apply_pack_style(cfg: &mut config::Config, qml: Option<&str>, lua: Option<&str>) {
+    if let Some(q) = qml {
         if let Ok(src) = std::fs::read_to_string(q) {
             let parsed = config::parse_for_test(&src);
             let wp = cfg.image_wallpaper.clone();
@@ -1568,8 +1572,8 @@ fn apply_pack_style(cfg: &mut config::Config, rwp: &ResolvedWp) {
             log::info!("pack: applied QML style {q}");
         }
     }
-    if let Some(l) = &rwp.lua {
-        cfg.lua_script = Some(l.clone());
+    if let Some(l) = lua {
+        cfg.lua_script = Some(l.to_string());
         log::info!("pack: applied Lua behavior {l}");
     }
 }
@@ -2308,6 +2312,9 @@ impl App {
             self.video_player = None;
             self.web_player = None;
             let rwp = resolve_wallpaper(path);
+            if rwp.kind == "image" || rwp.kind == "video" {
+                apply_pack_style(&mut self.cfg, rwp.qml.as_deref(), rwp.lua.as_deref());
+            }
             match rwp.kind.as_str() {
                 "web" => {
                     let (w, h) = self.cfg.web_wallpaper_size;
